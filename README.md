@@ -27,3 +27,22 @@ make check               # ruff, mypy, pytest (same as CI)
 `make check-config` validates your `.env`. It exits non zero with the offending variable
 named if anything points at live trading (`LIVE_TRADING`, `TRADING_MODE=live`,
 `ALPACA_PAPER=false`, or a non paper `ALPACA_BASE_URL`).
+
+## Replay MCP server (F1)
+
+A deterministic market simulator the agent talks to over MCP: historical bars for 20
+symbols, synthetic news, and a simulated cash account broker. The clock is simulated and
+no tool ever returns data from after "now".
+
+```bash
+make replay                 # stdio, demo scenario
+make replay-http            # http://127.0.0.1:8001/mcp, plus the advance_clock dev tool
+make inspector              # opens the MCP Inspector in your browser, connected to the server
+make replay SCENARIO=path/to/scenario.yaml
+```
+
+Tools: `get_clock`, `get_bars`, `get_quote`, `get_news`, `get_account`, `get_positions`,
+`place_order`, `cancel_order`, `list_orders` (and `advance_clock` with `--dev-tools`).
+Fill and timing rules are in [DECISIONS.md](DECISIONS.md) D005. Bar data comes from Yahoo
+Finance and is committed under `fixtures/bars/` (D004). All news under `fixtures/news/` is
+synthetic and labeled as such.

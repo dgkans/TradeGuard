@@ -1,4 +1,4 @@
-.PHONY: help install up down logs ps check-config test lint format typecheck check
+.PHONY: help install up down logs ps check-config test lint format typecheck check fixtures replay replay-http inspector
 
 help:
 	@echo "install       uv sync (Python deps + dev tools)"
@@ -9,6 +9,10 @@ help:
 	@echo "lint          ruff lint + format check"
 	@echo "typecheck     mypy"
 	@echo "check         lint + typecheck + test (same as CI)"
+	@echo "fixtures      re-download bar fixtures (overwrites committed data)"
+	@echo "replay        replay MCP server on stdio (SCENARIO=demo)"
+	@echo "replay-http   replay MCP server on http://127.0.0.1:8001/mcp with dev tools"
+	@echo "inspector     open the MCP Inspector in the browser against the replay server"
 
 install:
 	uv sync
@@ -45,3 +49,17 @@ typecheck:
 	uv run mypy
 
 check: lint typecheck test
+
+SCENARIO ?= demo
+
+fixtures:
+	uv run python -m services.replay_server.download
+
+replay:
+	uv run python -m services.replay_server --scenario $(SCENARIO)
+
+replay-http:
+	uv run python -m services.replay_server --scenario $(SCENARIO) --transport http --dev-tools
+
+inspector:
+	npx -y @modelcontextprotocol/inspector@2.11.0 uv run python -m services.replay_server --scenario $(SCENARIO) --dev-tools

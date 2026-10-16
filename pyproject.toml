@@ -5,16 +5,23 @@ description = "Safety and evaluation gateway for trading agents. Paper and repla
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "mcp>=2.3",
+    "pandas>=2.2",
+    "pyarrow>=21",
     "pydantic>=2.11",
     "python-dotenv>=1.1",
+    "pyyaml>=6",
+    "yfinance>=1.7",
 ]
 
 [dependency-groups]
 dev = [
     "mypy>=1.17",
+    "pandas-stubs>=3.0.5.260914",
     "pytest>=8.4",
     "pytest-asyncio>=1.1",
     "ruff>=0.12",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.uv]
@@ -47,3 +54,8 @@ files = ["services", "tests"]
 [[tool.mypy.overrides]]
 module = ["services.*"]
 strict = true
+
+# No type stubs published; only the fixture downloader uses it.
+[[tool.mypy.overrides]]
+module = ["yfinance"]
+ignore_missing_imports = true

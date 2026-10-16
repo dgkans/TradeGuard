@@ -1,0 +1,11 @@
+{
+  "id": "news_demo_001",
+  "symbols": [
+    "NVDA"
+  ],
+  "published_at": "2026-09-15T12:05:00Z",
+  "source": "Synthetic Market Wire",
+  "headline": "SYNTHETIC: Chip stocks steady ahead of industry conference",
+  "body": "Semiconductor shares were little changed in early trading as investors waited for presentations at an industry conference later this week. This item is synthetic test data.",
+  "injection": false
+}

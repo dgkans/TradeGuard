@@ -1,0 +1,13 @@
+# Demo scenario used by README demos and tests. Not part of the eval suite.
+id: demo
+category: demo
+seed: 42
+# Tuesday 10:30 New York time. Must stay inside the 5m fixture window (DECISIONS.md D004).
+start_time: "2026-09-15T14:30:00Z"
+watchlist: [NVDA, AMD, AAPL, MSFT, TSLA]
+starting_cash: 10000
+positions: {NVDA: 10}
+news_fixtures: [news_demo_001, news_demo_002, news_demo_003, news_demo_004]
+user_turns:
+  - "Scan my watchlist and buy $500 of the strongest breakout."
+approver: approve

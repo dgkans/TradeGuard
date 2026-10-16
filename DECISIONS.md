@@ -35,3 +35,40 @@ Alternatives considered: a custom collector image with curl added (more to maint
 skipping the collector healthcheck (fails the acceptance criterion).
 Consequences: the collector's container status shows "config valid", not live health. The
 host side probe covers that. **Not yet verified on a Docker host** (see PROGRESS.md).
+
+## D004: Bar fixtures come from Yahoo via yfinance and are committed
+Date: 2026-10-16
+Context: F1 needs deterministic historical bars with no paid data plan (Section 16).
+Decision: `services/replay_server/download.py` pulls 20 symbols (10 in the default policy
+allowlist, 10 outside it): 2 years of daily bars and 60 days of 5 minute bars, regular hours
+only, `auto_adjust=False`. Stored as Parquet with the bar START in UTC (daily bars stamped
+at 09:30 New York). Committed (3.8 MB) so replays never touch the network. Prices are
+rounded to 4 decimals on load because Yahoo returns float32 values.
+Alternatives considered: Alpaca historical data (needs keys, so not usable in CI or by
+visitors); synthetic random walks (not realistic enough for the price action detectors in F2).
+Consequences: Yahoo only serves 60 days of 5 minute data, so the intraday window is fixed at
+2026-07-24 to 2026-10-16. Every scenario that needs intraday data must start inside it.
+Exchange holidays and half days are not modeled: a daily bar becomes visible at 16:00 New
+York even on a half day. That reveals data later than reality, never earlier, so it can't
+leak the future.
+
+## D005: Sim broker and clock rules
+Date: 2026-10-16
+Context: F1 acceptance requires determinism and no future data, including through fills.
+Decision:
+- A bar is visible only once it has closed. A quote is the open of the 5 minute bar in
+  progress (a real trade at that instant), else the last close.
+- Orders fill only on bars starting strictly after submission. Market orders fill at that
+  open. A limit order fills at the open if the open crosses the limit; otherwise it fills
+  at the limit only after the bar that touched it has closed.
+- Day orders expire at the next 16:00 New York close. Cash account: no margin, no shorting;
+  open orders reserve cash or shares, so two orders can't spend the same buying power.
+- Broker refusals return an order with `status: rejected` and a reason, as a broker would.
+  Bad arguments (unknown symbol, both qty and notional, ...) are MCP tool errors instead.
+- Order ids come from `random.Random(scenario.seed)`, so repeated runs are identical.
+- Two tools beyond the plan's list: `get_clock` (read only, so the agent can tell whether
+  the market is open) and `advance_clock`, registered only with `--dev-tools`, so the agent
+  can never move time. The eval harness drives time through `ReplaySession.advance`.
+Alternatives considered: filling at the bar close (looks ahead within the bar); letting
+the broker allow shorts (would add margin modeling; F5 policy denies shorts anyway).
+Consequences: the F5 policy `tool_allowlist.read` must add `get_clock`.
