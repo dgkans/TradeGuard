@@ -1,0 +1,198 @@
+"""Startup configuration for every TradeGuard process.
+
+All settings come from environment variables, optionally seeded from a `.env` file.
+Values already in the process environment win over the file.
+
+The safety switch runs before normal validation and fails closed: any setting that could
+point the system at a live brokerage account stops startup. TradeGuard is paper and
+replay only (PLAN.md Section 3, Loop rule 3).
+"""
+
+import os
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
+
+from dotenv import dotenv_values
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+
+ALPACA_PAPER_HOST = "paper-api.alpaca.markets"
+
+# Anything outside these sets is treated as "on" / "not paper". Unknown spellings are
+# refused rather than guessed, so a typo can never enable live trading.
+FALSE_WORDS = {"", "0", "false", "no", "off"}
+TRUE_WORDS = {"1", "true", "yes", "on"}
+
+
+class ConfigError(Exception):
+    """The environment is invalid. The message names every bad variable."""
+
+
+class LiveTradingForbiddenError(ConfigError):
+    """The environment asks for live trading, which TradeGuard never allows."""
+
+
+class Settings(BaseModel):
+    """Validated process settings. Field aliases are the environment variable names."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
+
+    tradeguard_env: Literal["development", "test", "production"] = Field(
+        default="development", alias="TRADEGUARD_ENV"
+    )
+    trading_mode: Literal["replay", "paper"] = Field(default="replay", alias="TRADING_MODE")
+    live_trading: bool = Field(default=False, alias="LIVE_TRADING")
+    alpaca_paper: bool = Field(default=True, alias="ALPACA_PAPER")
+    alpaca_base_url: str = Field(default=f"https://{ALPACA_PAPER_HOST}", alias="ALPACA_BASE_URL")
+    alpaca_api_key: SecretStr | None = Field(default=None, alias="ALPACA_API_KEY")
+    alpaca_secret_key: SecretStr | None = Field(default=None, alias="ALPACA_SECRET_KEY")
+
+    database_url: SecretStr = Field(
+        default=SecretStr("postgresql://tradeguard:tradeguard@localhost:5432/tradeguard"),
+        alias="DATABASE_URL",
+    )
+
+    otel_exporter_otlp_endpoint: str = Field(
+        default="http://localhost:4317", alias="OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
+    otel_service_name: str = Field(default="tradeguard", alias="OTEL_SERVICE_NAME")
+
+    llm_provider: Literal["ollama", "groq", "gemini"] = Field(
+        default="ollama", alias="LLM_PROVIDER"
+    )
+    llm_model: str = Field(default="", alias="LLM_MODEL")
+    ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+    groq_api_key: SecretStr | None = Field(default=None, alias="GROQ_API_KEY")
+    gemini_api_key: SecretStr | None = Field(default=None, alias="GEMINI_API_KEY")
+
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
+        default="INFO", alias="LOG_LEVEL"
+    )
+
+    @field_validator("llm_provider", mode="before")
+    @classmethod
+    def reject_paid_provider(cls, value: object) -> object:
+        """Block the paid Anthropic API with a specific message (PLAN.md Section 16)."""
+        if isinstance(value, str) and value.strip().lower() == "anthropic":
+            raise ValueError(
+                "anthropic is disabled: the app must run on free providers "
+                "(ollama, groq, gemini). See PLAN.md Section 16."
+            )
+        return value
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def upper_log_level(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.upper()
+        return value
+
+
+def check_live_trading(raw: Mapping[str, str]) -> None:
+    """Refuse any raw environment that could reach a live brokerage endpoint.
+
+    Inputs: the raw, unvalidated environment mapping.
+    Output: None when the environment is safe.
+    Failure: raises LiveTradingForbiddenError listing every offending variable.
+    """
+    problems: list[str] = []
+
+    live_flag = raw.get("LIVE_TRADING", "").strip().lower()
+    if live_flag not in FALSE_WORDS:
+        problems.append(f"LIVE_TRADING={raw['LIVE_TRADING']!r} must be false")
+
+    mode = raw.get("TRADING_MODE", "").strip().lower()
+    if mode == "live":
+        problems.append("TRADING_MODE='live' is not allowed; use 'replay' or 'paper'")
+
+    if "ALPACA_PAPER" in raw:
+        paper_flag = raw["ALPACA_PAPER"].strip().lower()
+        if paper_flag not in TRUE_WORDS:
+            problems.append(f"ALPACA_PAPER={raw['ALPACA_PAPER']!r} must be true")
+
+    base_url = raw.get("ALPACA_BASE_URL", "").strip()
+    if base_url and not is_alpaca_paper_url(base_url):
+        problems.append(f"ALPACA_BASE_URL={base_url!r} must be https://{ALPACA_PAPER_HOST}")
+
+    if problems:
+        details = "; ".join(problems)
+        raise LiveTradingForbiddenError(f"Refusing to start: live trading is forbidden. {details}")
+
+
+def is_alpaca_paper_url(url: str) -> bool:
+    """True only for https URLs whose host is exactly the Alpaca paper host."""
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        return False
+    if parts.hostname != ALPACA_PAPER_HOST:
+        return False
+    return parts.port in (None, 443)
+
+
+def read_environment(
+    env_file: str | Path | None, environ: Mapping[str, str] | None
+) -> dict[str, str]:
+    """Merge the optional .env file under the process environment."""
+    merged: dict[str, str] = {}
+    if env_file is not None and Path(env_file).is_file():
+        for key, value in dotenv_values(env_file).items():
+            if value is not None:
+                merged[key] = value
+    source = os.environ if environ is None else environ
+    for key, value in source.items():
+        merged[key] = value
+    return merged
+
+
+def load_settings(
+    env_file: str | Path | None = ".env", environ: Mapping[str, str] | None = None
+) -> Settings:
+    """Read, safety check and validate settings.
+
+    Inputs: an optional .env path and an optional environment mapping
+    (defaults to os.environ).
+    Output: a frozen Settings object.
+    Failure: LiveTradingForbiddenError for any live trading configuration,
+    ConfigError for any other invalid value. Both name the variables at fault.
+    """
+    raw = read_environment(env_file, environ)
+    check_live_trading(raw)
+
+    # Empty strings in .env mean "unset" so defaults apply.
+    present: dict[str, str] = {}
+    for key, value in raw.items():
+        if value.strip() != "":
+            present[key] = value.strip()
+
+    try:
+        return Settings.model_validate(present)
+    except ValidationError as exc:
+        raise ConfigError(format_validation_error(exc)) from None
+
+
+def format_validation_error(exc: ValidationError) -> str:
+    lines = ["Invalid configuration:"]
+    for error in exc.errors():
+        field = ".".join(str(part) for part in error["loc"])
+        lines.append(f"  {field}: {error['msg']}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    """Validate the environment and print a short summary. Exit code 0 means safe."""
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(
+        f"config ok: env={settings.tradeguard_env} mode={settings.trading_mode} "
+        f"llm={settings.llm_provider}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

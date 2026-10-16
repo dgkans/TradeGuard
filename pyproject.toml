@@ -1,0 +1,49 @@
+[project]
+name = "tradeguard"
+version = "0.1.0"
+description = "Safety and evaluation gateway for trading agents. Paper and replay only."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.11",
+    "python-dotenv>=1.1",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.17",
+    "pytest>=8.4",
+    "pytest-asyncio>=1.1",
+    "ruff>=0.12",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "S", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is how pytest works
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+files = ["services", "tests"]
+
+# Plan Section 8: strict on the gateway. Applied to all of services/ so the
+# gateway's imports from services.common are held to the same bar.
+[[tool.mypy.overrides]]
+module = ["services.*"]
+strict = true
