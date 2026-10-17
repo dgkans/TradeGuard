@@ -10,7 +10,7 @@
 | F5 Policy engine | done | 2026-10-16 |
 | F6 Approval flow | done | 2026-10-16 |
 | F7 Taint tracking | done | 2026-10-16 |
-| F8 Intent alignment | not started | |
+| F8 Intent alignment | in progress | |
 | F9 Eval harness | not started | |
 | F10 Dashboard | not started | |
 | F11 Alpaca paper | not started | |
@@ -200,7 +200,7 @@
 - Gaps: no API auth; approvals are polled every 2 s, not pushed; the dashboard approval page comes in F10.
 - Next: F7 Provenance and taint tracking (the plan suggests opusplan for this one).
 
-## Current feature: F7 Provenance and taint tracking
+## F7 Provenance and taint tracking
 ### Plan
 - Trust labels in the policy file (`taint.trust_labels`; unlisted tools default to untrusted). `get_news` is untrusted; account, market data and pattern tools are trusted. User messages are trusted.
 - Provenance store per session (memory, plus Postgres `provenance_events`, Alembic 0003, reloaded when a session's gateway restarts): ordered entries of user messages and tool results with source, trust, risk score, detector signals, excerpt and hash.
@@ -231,3 +231,30 @@
 - Numbers: detector precision 1.0, recall 0.867 on 60 self-written snippets (optimistic, see RESULTS.md caveats).
 - Gaps: the support check is keyword based (F8 adds amounts, units and an LLM judge); the detector misses single-weak-signal injections; the real model wasn't fooled by our labeled fixtures, so the baseline contrast is unproven.
 - Next: F8 Intent alignment (the plan suggests opusplan).
+
+## Current feature: F8 Intent alignment
+### Plan
+- `services/gateway/intent/parser.py`: deterministic parse of the latest user message into intents `{side, symbol, amount, unit (usd | shares | pct_position), condition}`. Several intents per message ("buy $500 of NVDA and $300 of AMD"). Marks the parse *ambiguous* for a bare number with no unit ("buy 1000 NVDA"), vague quantities ("half my cash", "double"), pronoun targets ("buy more of it"), or trade verbs outside the side vocabulary ("put $500 into", "load up on").
+- `compare.py`: order vs intent, using the policy context price and holdings.
+  - No trade intent: DENY `intent_missing`.
+  - Wrong side: DENY `intent_wrong_side`. Wrong symbol: DENY `intent_wrong_symbol`.
+  - Dollars vs shares: ESCALATE `intent_unit_confusion`, when the order uses the user's number in the other unit.
+  - Size: DENY `intent_amount_mismatch` when over the tolerance (default 10%); smaller than asked is ESCALATE.
+  - Delegated symbol ("the strongest breakout") is not a symbol mismatch.
+- `judge.py`: LLM judge, only when the parse is ambiguous. One structured JSON call `{aligned, confidence, reason, intent}` (this is also the plan's LLM parsing fallback).
+  - Ambiguous unit: always ESCALATE `intent_ambiguous_unit`, with the judge's view attached. The judge can deny it but never allow it.
+  - Other ambiguity: aligned with confidence >= 0.8 is ALLOW, misaligned with confidence >= 0.8 is DENY, anything else ESCALATE.
+  - If the judge is unavailable or returns bad output: ESCALATE `intent_judge_unavailable` (a human decides).
+- Judge prompt versioned as `services/agent/prompts/judge_v1.md`. Prompt version, model and whether the judge ran are in the audit reason and the `tradeguard.intent.*` span attributes. The LLM factory moves to `services/common/llm.py` so the gateway doesn't import agent code.
+- Pipeline stage 5 runs after taint and before approval; an intent ESCALATE counts as approved on re-check after a human approval. Policy section `intent:` (enabled, tolerance, judge settings).
+- Labeled set of 40+ intent cases with hand labels, frozen and committed *before* the judge prompt is written. One judge run with qwen3:8b; agreement goes into RESULTS.md.
+### Acceptance
+- [ ] Dollars vs shares confusion caught and escalated (tested)
+- [ ] Wrong symbol or side denied (tested)
+- [ ] Judge agreement with hand labels reported on at least 40 labeled cases
+- [ ] Judge only runs when deterministic parsing is ambiguous (logged and tested)
+### Notes and open questions
+- Open from F7, needed before F9: whether injection fixtures keep the in-text "SYNTHETIC" label (recommended: metadata only).
+- Labeled set `evals/datasets/intent_cases.jsonl` (44 cases, 21 aligned) frozen before the judge prompt was written: sha256 `eaa1001f2448a02d096f3f079e07dadc93a32bc864aeb56b4218eda447b6030b`. Labels are mine. The two `ambiguous_unit` cases ("buy 1000 NVDA" placed as $1000) are labeled aligned, which is a judgment call; the gateway escalates them regardless.
+### Loop summary
+-
