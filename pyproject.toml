@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.16",
+    "fastapi>=0.118",
     "jsonschema>=4.25",
     "langchain-core>=1.6",
     "langchain-ollama>=1.1",
@@ -26,6 +27,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28",
     "mypy>=1.17",
     "pandas-stubs>=3.0.5.260914",
     "pytest>=8.4",
@@ -64,6 +66,9 @@ select = ["E", "F", "W", "I", "B", "UP", "N", "S", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # assert is how pytest works
 "tests/**" = ["S101"]
+# SQL here is assembled only from module constants (column lists, fixed clauses); every
+# value goes through psycopg parameters.
+"services/gateway/approvals.py" = ["S608"]
 
 [tool.mypy]
 python_version = "3.12"

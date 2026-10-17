@@ -23,7 +23,8 @@ import psycopg
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from mcp.client.stdio import StdioServerParameters
 
-from services.agent.graph import AgentContext, build_graph, run_turn
+from services.agent.approvals import wait_for_decision
+from services.agent.graph import AgentContext, build_graph, resume_turn, run_turn
 from services.agent.llm import make_chat_model
 from services.agent.tools import McpToolset, ToolCallLog
 from services.common.config import ConfigError, Settings, child_env, load_settings
@@ -71,22 +72,54 @@ async def chat(args: argparse.Namespace, settings: Settings) -> int:
             print(f"session {session_id} | scenario {scenario.id} | model {model} | {route} "
                   "| paper/replay only")  # fmt: skip
             print(f"tool log: {log.path}")
+            turn = Turn(graph, toolset, session_id, operator_meta, settings)
             if args.once:
-                return await one_turn(graph, args.once, session_id)
-            return await repl(graph, toolset, session_id, operator_meta)
+                print(f"\nyou> {args.once}")
+                await turn.send(args.once)
+                return 0
+            return await repl(turn)
 
 
-async def one_turn(graph: Any, text: str, session_id: str) -> int:
-    print(f"\nyou> {text}")
-    result = await run_turn(graph, text, thread_id=session_id)
-    print(f"[understand: {result['request_type']} | {result['summary']}]")
-    print(f"agent> {result['answer']}\n")
-    return 0
+class Turn:
+    """Runs one user message, including any pause for human approval."""
+
+    def __init__(self, graph: Any, toolset: McpToolset, session_id: str,
+                 operator_meta: dict[str, Any], settings: Settings) -> None:  # fmt: skip
+        self.graph = graph
+        self.toolset = toolset
+        self.session_id = session_id
+        self.operator_meta = operator_meta
+        self.settings = settings
+
+    async def send(self, text: str) -> None:
+        result = await run_turn(self.graph, text, thread_id=self.session_id)
+        print(f"[understand: {result['request_type']} | {result['summary']}]")
+        while result["pending_approval"]:
+            outcome = await self.wait(result["pending_approval"])
+            result = await resume_turn(self.graph, outcome, thread_id=self.session_id)
+        print(f"agent> {result['answer']}")
+
+    async def wait(self, pending: dict[str, Any]) -> dict[str, Any]:
+        approval_id = pending["approval_id"]
+        base = f"http://{self.settings.api_host}:{self.settings.api_port}/approvals/{approval_id}"
+        print(f"\n[approval needed] {pending['tool']} {json.dumps(pending['args'])}")
+        print(f"  why: {pending['reason']} ({pending['rule_id']})")
+        print(f"  expires: {pending['expires_at']}")
+        print(f"  approve: curl -s -X POST {base}/approve -H 'content-type: application/json' "
+              f"-d '{{\"decided_by\": \"you\", \"note\": \"ok\"}}'")  # fmt: skip
+        print(f"  reject:  curl -s -X POST {base}/reject -H 'content-type: application/json' "
+              f"-d '{{\"decided_by\": \"you\", \"note\": \"why\"}}'")  # fmt: skip
+        print("  waiting for a decision...", flush=True)
+        outcome = await wait_for_decision(
+            self.toolset, approval_id, self.operator_meta,
+            max_wait_seconds=self.settings.approval_timeout_seconds + 30,
+        )  # fmt: skip
+        print(f"[approval {outcome['status']}] decided_by={outcome.get('decided_by')} "
+              f"note={outcome.get('note')!r} executed={outcome.get('executed')}")  # fmt: skip
+        return outcome
 
 
-async def repl(
-    graph: Any, toolset: McpToolset, session_id: str, operator_meta: dict[str, Any]
-) -> int:
+async def repl(turn: "Turn") -> int:
     print("Type a message. /advance N moves the clock, /clock shows it, /quit exits.")
     while True:
         try:
@@ -99,16 +132,15 @@ async def repl(
         if text in ("/quit", "/exit"):
             return 0
         if text == "/clock":
-            print(await toolset.call("get_clock", {}, operator_meta))
+            print(await turn.toolset.call("get_clock", {}, turn.operator_meta))
             continue
         if text.startswith("/advance"):
             parts = text.split()
             minutes = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
-            print(await toolset.call("advance_clock", {"minutes": minutes}, operator_meta))
+            print(await turn.toolset.call("advance_clock", {"minutes": minutes},
+                                          turn.operator_meta))  # fmt: skip
             continue
-        result = await run_turn(graph, text, thread_id=session_id)
-        print(f"[understand: {result['request_type']} | {result['summary']}]")
-        print(f"agent> {result['answer']}")
+        await turn.send(text)
 
 
 STATS_QUERY = """
@@ -139,6 +171,17 @@ def gateway_stats(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def run_api(settings: Settings) -> int:
+    """Serve the approval API on API_HOST:API_PORT against DATABASE_URL."""
+    import uvicorn
+
+    from services.gateway.api.app import create_postgres_app
+
+    app = create_postgres_app(settings.database_url.get_secret_value())
+    uvicorn.run(app, host=settings.api_host, port=settings.api_port, log_level="warning")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tradeguard")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -153,12 +196,15 @@ def main(argv: list[str] | None = None) -> int:
     chat_cmd.add_argument("--policy", default="policies/default.yaml", help="gateway policy")
     stats_cmd = commands.add_parser("gateway-stats", help="gateway overhead for a session")
     stats_cmd.add_argument("--session", required=True)
+    commands.add_parser("api", help="run the approval API (APPROVAL_* and API_* settings)")
     args = parser.parse_args(argv)
 
     try:
         settings = load_settings()
         if args.command == "gateway-stats":
             return gateway_stats(args, settings)
+        if args.command == "api":
+            return run_api(settings)
         provider = setup_tracing("tradeguard-agent", settings)
         try:
             return asyncio.run(chat(args, settings))

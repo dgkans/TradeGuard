@@ -213,3 +213,43 @@ Consequences:
 - Observed with qwen3:8b (manual runs, not an eval metric): "Buy $3000 of TSLA" was
   denied by `max_order_notional` and the agent explained the $2000 limit; "Buy $1500 of
   NVDA" was escalated by `approval_notional` and the agent said it awaits approval.
+
+## D010: Human approval flow (F6)
+Date: 2026-10-16
+Context: Escalated calls must wait for a human, never run when rejected or timed out, and
+leave an audit trail.
+Decision:
+- **Who executes:** the gateway, using the arguments it stored when the call escalated.
+  The agent never resubmits them, so an approved order can't be swapped for a different
+  one. Before running, the gateway re-runs every deny rule (`skip_approval=True`): the
+  market may have closed or limits filled while it waited (tested: closes, becomes
+  `blocked`, `market_hours`).
+- **Exactly once:** `claim()` moves approved -> executing in one atomic UPDATE (an
+  asyncio-atomic step in the memory store). Later `resolve_approval` calls return the
+  stored outcome.
+- **Timeout:** wall clock, not the sim clock, because humans decide in real time.
+  `APPROVAL_TIMEOUT_SECONDS` (default 300). Expiry is applied inside every read and
+  decision transaction, so there's no sweeper process and no window where an expired
+  approval can be approved.
+- **Audit:** the original call's row (ESCALATE, its rule), then `human_approval`,
+  `human_rejection` or `approval_timeout` (written in the same transaction as the status
+  change), then `human_approved` with timings when it executes, or the deny rule when
+  blocked.
+- **Agent:** after the tools node, a pending ESCALATE routes to `await_approval`, which
+  calls LangGraph `interrupt()` with the approval id. On resume the escalated ToolMessage
+  is replaced in place (same message id) by the final outcome, so the model reasons about
+  what actually happened. The CLI polls `resolve_approval` (operator token) every 2 s,
+  which also triggers execution, then resumes the graph with `Command(resume=outcome)`.
+- **`resolve_approval`** is a gateway-native tool. It's listed, because an unlisted tool
+  made the MCP client re-list tools and log a warning on every poll, and hidden from the
+  model by the agent's toolset. Without the operator token it's a DENY `operator_only`.
+- **API:** FastAPI, `tradeguard api` on 127.0.0.1:8000. No authentication yet: local only.
+  F12 must add auth (and a dashboard login) before anything is public.
+Alternatives considered: the agent retries the order with an approval id (it could
+change the arguments); a background expiry sweeper (another process, and a race);
+LangGraph-only approval state (the gateway, not the agent, must own the decision).
+Consequences:
+- Observed with qwen3:8b (manual runs, not an eval metric): after approval, asked for
+  the order's status, it answered "new" from memory without calling a tool, after the
+  order had filled. Asked explicitly to call list_orders, it reported the fill correctly
+  ($212.70, 7.05 shares). On rejection it relayed the reviewer's note.

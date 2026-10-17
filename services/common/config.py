@@ -70,6 +70,10 @@ class Settings(BaseModel):
     groq_api_key: SecretStr | None = Field(default=None, alias="GROQ_API_KEY")
     gemini_api_key: SecretStr | None = Field(default=None, alias="GEMINI_API_KEY")
 
+    approval_timeout_seconds: float = Field(default=300, gt=0, alias="APPROVAL_TIMEOUT_SECONDS")
+    api_host: str = Field(default="127.0.0.1", alias="API_HOST")
+    api_port: int = Field(default=8000, gt=0, lt=65536, alias="API_PORT")
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO", alias="LOG_LEVEL"
     )

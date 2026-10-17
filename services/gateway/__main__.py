@@ -19,6 +19,7 @@ from mcp.server.stdio import stdio_server
 
 from services.common.config import ConfigError, child_env, load_settings
 from services.common.telemetry import setup_tracing
+from services.gateway.approvals import ApprovalStore, MemoryApprovalStore, PostgresApprovalStore
 from services.gateway.audit import AuditSink, MemoryAuditSink, PostgresAuditSink, check_schema
 from services.gateway.mcp_proxy.proxy import (
     OPERATOR_TOKEN_ENV,
@@ -45,12 +46,16 @@ async def serve(args: argparse.Namespace) -> int:
     try:
         async with AsyncExitStack() as stack:
             audit: AuditSink
+            approvals: ApprovalStore
             if args.audit == "memory":
-                audit = MemoryAuditSink()
+                memory_audit = MemoryAuditSink()
+                audit = memory_audit
+                approvals = MemoryApprovalStore(audit=memory_audit)
             else:
                 url = settings.database_url.get_secret_value()
                 await check_schema(url)
                 audit = await stack.enter_async_context(PostgresAuditSink(url))
+                approvals = await stack.enter_async_context(PostgresApprovalStore(url))
             gateway = await stack.enter_async_context(
                 Gateway(
                     [upstream],
@@ -58,6 +63,8 @@ async def serve(args: argparse.Namespace) -> int:
                     session_id=args.session,
                     policy=policy,
                     operator_token=os.environ.get(OPERATOR_TOKEN_ENV) or None,
+                    approvals=approvals,
+                    approval_timeout_s=settings.approval_timeout_seconds,
                 )
             )
             policy_name = policy.name if policy else "none (pass through)"

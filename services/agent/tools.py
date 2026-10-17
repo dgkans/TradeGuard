@@ -23,8 +23,9 @@ from opentelemetry import trace
 
 from services.agent.prompts import SYSTEM_PROMPT
 
-# Operator controls that the model must never be able to call.
-DEV_ONLY_TOOLS = frozenset({"advance_clock"})
+# Operator controls that the model must never be able to call. Hiding them here is a
+# convenience; the gateway refuses them without the operator token regardless.
+DEV_ONLY_TOOLS = frozenset({"advance_clock", "resolve_approval"})
 
 McpTarget = MCPServer | Server[Any] | StdioServerParameters | str
 tracer = trace.get_tracer("tradeguard.agent")
@@ -113,6 +114,8 @@ class McpToolset:
         result, error = await self._raw_call(name, args, meta)
         if error is not None:
             raise RuntimeError(error)
+        if isinstance(result, str) and result.lstrip().startswith("{"):
+            return json.loads(result)  # gateway native tools reply with JSON text
         return result
 
     async def _raw_call(

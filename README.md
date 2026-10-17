@@ -125,3 +125,23 @@ uv run tradeguard chat --scenario demo --once "Buy \$1500 of NVDA"   # ESCALATE 
 Policy files reject unknown fields, and errors name the field, for example
 `require_approval.notional_over_usd: Input should be a valid number`. Design notes are in
 [DECISIONS.md](DECISIONS.md) D009.
+
+## Human approval (F6)
+
+Escalated calls wait in an approval queue instead of being refused. The agent pauses
+(LangGraph interrupt) until a human approves, rejects, or the approval times out
+(`APPROVAL_TIMEOUT_SECONDS`, default 300).
+
+```bash
+uv run tradeguard api                                  # approval API on :8000 (docs at /docs)
+uv run tradeguard chat --scenario demo --once "Buy \$1500 of NVDA"
+# the CLI prints the approval id and the exact approve/reject commands, e.g.
+curl -s localhost:8000/approvals?status=pending
+curl -s -X POST localhost:8000/approvals/<id>/approve -H 'content-type: application/json' \
+     -d '{"decided_by": "you", "note": "ok"}'
+```
+
+On approval the gateway re-checks every deny rule and then executes the *stored*
+arguments exactly once. Rejected and expired approvals never execute, and the agent is
+told the outcome and the reviewer's note. Every step is in `audit_events`. The API has
+no authentication yet: local use only. Details in [DECISIONS.md](DECISIONS.md) D010.

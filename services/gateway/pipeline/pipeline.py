@@ -32,14 +32,22 @@ class Pipeline:
         self.context_rules: list[Rule] = [rule(policy) for rule in CONTEXT_RULES]
         self.approval_rules: list[Rule] = [rule(policy) for rule in APPROVAL_RULES]
 
-    async def decide(self, call: ToolCall, fetch_context: ContextFetcher) -> Verdict:
-        """Return the verdict for one tool call. Never raises: errors become DENY."""
+    async def decide(
+        self, call: ToolCall, fetch_context: ContextFetcher, *, skip_approval: bool = False
+    ) -> Verdict:
+        """Return the verdict for one tool call. Never raises: errors become DENY.
+
+        `skip_approval` re-checks a human approved call: every deny rule still applies,
+        only the approval stage is skipped.
+        """
         try:
-            return await self._decide(call, fetch_context)
+            return await self._decide(call, fetch_context, skip_approval)
         except Exception as exc:
             return Verdict("DENY", "pipeline_error", f"{type(exc).__name__}: {exc}")
 
-    async def _decide(self, call: ToolCall, fetch_context: ContextFetcher) -> Verdict:
+    async def _decide(
+        self, call: ToolCall, fetch_context: ContextFetcher, skip_approval: bool
+    ) -> Verdict:
         schema_problem = self.check_schema(call)
         if schema_problem is not None:
             return schema_problem
@@ -66,6 +74,8 @@ class Pipeline:
             if not result.passed:
                 return Verdict(result.decision, result.rule_id, result.reason)
 
+        if skip_approval:
+            return Verdict("ALLOW", "policy_pass", "re-check after human approval passed")
         for rule in self.approval_rules:
             result = rule.evaluate(call, context)
             if not result.passed:

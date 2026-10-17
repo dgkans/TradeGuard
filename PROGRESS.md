@@ -8,7 +8,7 @@
 | F3 Baseline agent | done | 2026-10-16 |
 | F4 Gateway proxy | done | 2026-10-16 |
 | F5 Policy engine | done | 2026-10-16 |
-| F6 Approval flow | not started | |
+| F6 Approval flow | done | 2026-10-16 |
 | F7 Taint tracking | not started | |
 | F8 Intent alignment | not started | |
 | F9 Eval harness | not started | |
@@ -148,7 +148,7 @@
 - Gaps: `advance_clock` still reachable through the gateway (F5 allowlist); replay account still resets per process; overhead not measured with tracing on or against a remote DB.
 - Next: F5 Policy engine.
 
-## Current feature: F5 Policy engine
+## F5 Policy engine
 ### Plan
 - `services/gateway/policy/model.py`: Pydantic `Policy` (fields from PLAN.md F5, `extra="forbid"` so typos fail), YAML loader whose errors name the field (`require_approval.notional_over_usd: ...`). `policies/default.yaml` and `policies/strict.yaml`.
 - `services/gateway/pipeline/`: stages in Section 2 order: (1) schema check against the upstream tool's JSON schema, (2) tool allowlist, (3) policy rules, (6) approval rules. First DENY wins, then the first ESCALATE, else ALLOW `policy_pass`. Any exception is a DENY `pipeline_error` (fail closed).
@@ -172,3 +172,30 @@
 - Evals: none (harness is F9). Manual qwen3:8b runs matched the plan's demo: $3000 TSLA denied, $1500 NVDA escalated.
 - Gaps: ESCALATE not queued yet (F6); context mapping is specific to the replay server (F11 adapter); write call overhead with context fetch not yet benchmarked.
 - Next: F6 Human approval flow.
+
+## Current feature: F6 Human approval flow
+### Plan
+- `approvals` table (Alembic 0002): id, session, tool, args, rule and reason, status (pending, approved, rejected, expired, executed, blocked), created, expires, decided, decided_by, note, result, linked audit event.
+- `services/gateway/approvals.py`: an approval store (Postgres, plus in memory for tests). Expiry is applied atomically on every read or decision, so a timed out approval can never be approved. Every approve, reject or expire also writes an `audit_events` row.
+- Gateway: on ESCALATE it parks the call as a pending approval and returns `approval_id` to the agent; the call is not executed. If the approval can't be stored: DENY `approval_unavailable`.
+- Gateway operator tool `resolve_approval(approval_id)`, not listed and operator token only. Pending returns pending. Rejected or expired returns that with the note. Approved re-runs the deny rules on the *stored* arguments, then executes exactly once (atomic claim), audits `human_approved`, and returns the result. Repeat calls are idempotent.
+- Agent graph: after the tools node, an ESCALATE result routes to `await_approval`, which calls LangGraph `interrupt()` with the approval id. On resume, the escalated ToolMessage is replaced by the final outcome, so the model sees what actually happened and explains it.
+- CLI: on interrupt it prints the approve and reject commands, polls `resolve_approval`, then resumes the graph.
+- FastAPI (`tradeguard api`, :8000): `GET /approvals?status=pending`, `GET /approvals/{id}`, `POST /approvals/{id}/approve` and `/reject` with `decided_by` and `note`; 409 when the approval is no longer pending.
+- `APPROVAL_TIMEOUT_SECONDS` (default 300) auto rejects as `expired`.
+### Acceptance
+- [x] Escalated order is not executed until approved (tested at store, gateway and agent level; demo: approved via curl, then filled at $212.70 after /advance 5)
+- [x] Rejected order is never executed and the agent tells the user why (tested: the model receives the reviewer's note; qwen3:8b relayed it in a manual run)
+- [x] Timeout auto rejects (tested with 0.05 to 0.2 s timeouts, memory and Postgres)
+- [x] Approval decisions recorded in the audit trail (`human_approval`, `human_rejection`, `approval_timeout`, `human_approved`; tested, and visible for sessions f6-fill and f6-reject)
+### Notes and open questions
+- The API has no authentication locally. F12 must add it before anything is public.
+- Spec change during the loop: `resolve_approval` is now listed (and hidden from the model by the agent's toolset) because an unlisted tool made the MCP client re-list tools and warn on every poll. An agent call without the token is DENY `operator_only`.
+- One regression test (resolve returns JSON text only) was written together with its fix, not before it.
+- Model finding (manual, D010): qwen3:8b once answered an order status from memory instead of calling a tool.
+### Loop summary
+- Built: `approvals` table and store (Postgres and memory) with in-transaction expiry and audit, gateway parking and `resolve_approval` (re-check, exactly once), LangGraph interrupt and resume, CLI wait loop with approve/reject commands, FastAPI approval API (`tradeguard api`).
+- Tests: 215 passing (29 new for F6); ruff and mypy strict clean.
+- Evals: none (harness is F9).
+- Gaps: no API auth; approvals are polled every 2 s, not pushed; the dashboard approval page comes in F10.
+- Next: F7 Provenance and taint tracking (the plan suggests opusplan for this one).

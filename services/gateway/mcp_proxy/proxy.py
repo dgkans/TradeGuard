@@ -25,6 +25,7 @@ from opentelemetry import trace
 
 from services.common import config
 from services.common.telemetry import current_ids
+from services.gateway.approvals import Approval, ApprovalStore
 from services.gateway.audit import AuditOutcome, AuditSink, DecisionRecord, summarize_result
 from services.gateway.pipeline.pipeline import Pipeline
 from services.gateway.pipeline.types import PolicyContext, ToolCall, Verdict
@@ -43,6 +44,19 @@ ESCALATE_NOTE = (
     "This call needs human approval. It was not executed. Tell the user it is waiting for "
     "approval and why."
 )
+# Gateway native operator tool. Listed (so MCP clients don't re-list tools and warn on
+# every call), hidden from the model by the agent's toolset, and refused without the token.
+RESOLVE_TOOL = "resolve_approval"
+RESOLVE_TOOL_SPEC = types.Tool(
+    name=RESOLVE_TOOL,
+    description="OPERATOR ONLY. Report an approval's state; execute it once if approved.",
+    input_schema={
+        "type": "object",
+        "properties": {"approval_id": {"type": "string"}},
+        "required": ["approval_id"],
+    },
+)
+DEFAULT_APPROVAL_TIMEOUT_S = 300.0
 
 
 class GatewayConfigError(Exception):
@@ -66,12 +80,16 @@ class Gateway:
         session_id: str,
         policy: Policy | None = None,
         operator_token: str | None = None,
+        approvals: ApprovalStore | None = None,
+        approval_timeout_s: float = DEFAULT_APPROVAL_TIMEOUT_S,
     ) -> None:
         self.upstreams = upstreams
         self.audit = audit
         self.session_id = session_id
         self.policy = policy
         self.operator_token = operator_token
+        self.approvals = approvals
+        self.approval_timeout_s = approval_timeout_s
         self.pipeline: Pipeline | None = None
         self.tools: list[types.Tool] = []
         self._routes: dict[str, tuple[str, Client]] = {}
@@ -121,14 +139,22 @@ class Gateway:
     async def _list_tools(
         self, ctx: ServerRequestContext[Any], params: types.PaginatedRequestParams | None
     ) -> types.ListToolsResult:
-        return types.ListToolsResult(tools=list(self.tools))
+        tools = list(self.tools)
+        if self.approvals is not None:
+            tools.append(RESOLVE_TOOL_SPEC)
+        return types.ListToolsResult(tools=tools)
 
     async def _call_tool(
         self, ctx: ServerRequestContext[Any], params: types.CallToolRequestParams
     ) -> types.CallToolResult:
         meta = params.meta or {}
         token = meta.get(OPERATOR_META_KEY) if isinstance(meta, dict) else None
-        return await self.handle(params.name, dict(params.arguments or {}), operator_token=token)
+        args = dict(params.arguments or {})
+        if params.name == RESOLVE_TOOL and self.approvals is not None:
+            if self._operator_ok(token):
+                return await self.resolve(str(args.get("approval_id", "")))
+            return await self.handle(params.name, args, operator_token=token)
+        return await self.handle(params.name, args, operator_token=token)
 
     # --- pipeline -------------------------------------------------------------------
 
@@ -137,6 +163,8 @@ class Gateway:
     ) -> Verdict:
         """Unknown tool -> DENY. Operator tool with the right token -> ALLOW. No policy ->
         pass through. Otherwise the policy pipeline decides."""
+        if tool == RESOLVE_TOOL and self.approvals is not None:
+            return Verdict("DENY", "operator_only", f"{tool} needs the session operator token")
         if tool not in self._routes:
             return Verdict("DENY", "unknown_tool", f"no upstream exposes tool {tool!r}")
         if self.is_operator_call(tool, operator_token):
@@ -145,10 +173,13 @@ class Gateway:
             return Verdict("ALLOW", "pass_through", "no policy configured: pass through")
         return await self.pipeline.decide(ToolCall(tool, args), self.fetch_context)
 
+    def _operator_ok(self, token: object) -> bool:
+        return self.operator_token is not None and token == self.operator_token
+
     def is_operator_call(self, tool: str, token: object) -> bool:
-        if self.policy is None or self.operator_token is None:
+        if self.policy is None:
             return False
-        return tool in self.policy.operator_tools and token == self.operator_token
+        return tool in self.policy.operator_tools and self._operator_ok(token)
 
     async def fetch_context(self, call: ToolCall) -> PolicyContext:
         """Read account and market state from the upstream. These reads are the gateway's
@@ -214,7 +245,9 @@ class Gateway:
                 return self.refusal(tool, failed)
 
             upstream_ms = 0.0
-            if verdict.decision != "ALLOW":
+            if verdict.decision == "ESCALATE" and self.approvals is not None:
+                result = await self._park(tool, args, verdict, event_id)
+            elif verdict.decision != "ALLOW":
                 result = self.refusal(tool, verdict)
             else:
                 result, upstream_ms = await self._forward(tool, args)
@@ -250,7 +283,104 @@ class Gateway:
                 result = refusal(f"upstream {upstream_name} failed: {type(exc).__name__}: {exc}")
         return result, (time.perf_counter() - started) * 1000
 
-    def refusal(self, tool: str, verdict: Verdict) -> types.CallToolResult:
+    # --- approvals ------------------------------------------------------------------
+
+    async def _park(
+        self, tool: str, args: dict[str, Any], verdict: Verdict, event_id: int
+    ) -> types.CallToolResult:
+        """Store an escalated call as a pending approval. If that fails: DENY."""
+        if self.approvals is None:
+            return self.refusal(tool, verdict)
+        try:
+            approval = await self.approvals.create(
+                session_id=self.session_id, tool=tool, args=args, rule_id=verdict.rule_id,
+                reason=verdict.reason, audit_event_id=event_id,
+                timeout_s=self.approval_timeout_s,
+            )  # fmt: skip
+        except Exception as exc:
+            failed = Verdict("DENY", "approval_unavailable", f"could not queue approval: {exc}")
+            return self.refusal(tool, failed)
+        return self.refusal(
+            tool, verdict, approval_id=approval.id, status="pending",
+            expires_at=approval.expires_at.isoformat(),
+        )  # fmt: skip
+
+    async def resolve(self, approval_id: str) -> types.CallToolResult:
+        """Operator only. Report an approval's state; if approved, run it exactly once.
+
+        The stored arguments are executed, never new ones, after re-checking every deny
+        rule (the market may have closed, or limits filled, while it waited).
+        """
+        with tracer.start_as_current_span(
+            "gateway.resolve_approval", attributes={"tradeguard.approval_id": approval_id}
+        ) as span:
+            body = await self._resolve(approval_id)
+            span.set_attribute("tradeguard.approval_status", str(body.get("status")))
+        # JSON text only: resolve_approval is unlisted, so clients have no output schema to
+        # validate structured content against (and the MCP client warns on every call).
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps(body, default=str))]
+        )
+
+    async def _resolve(self, approval_id: str) -> dict[str, Any]:
+        if self.approvals is None:
+            return {"approval_id": approval_id, "status": "unknown", "executed": False}
+        approval = await self.approvals.get(approval_id)
+        if approval is None or approval.session_id != self.session_id:
+            return {"approval_id": approval_id, "status": "unknown", "executed": False,
+                    "reason": "no such approval in this session"}  # fmt: skip
+        if approval.status == "approved":
+            claimed = await self.approvals.claim(approval_id)
+            if claimed is not None:
+                return await self._execute_approved(claimed)
+            approval = await self.approvals.get(approval_id) or approval
+        return approval_view(approval)
+
+    async def _execute_approved(self, approval: Approval) -> dict[str, Any]:
+        if self.approvals is None:
+            raise RuntimeError("approval store missing")
+        call = ToolCall(approval.tool, approval.args)
+        verdict = Verdict("ALLOW", "human_approved", "no policy configured")
+        if self.pipeline is not None:
+            verdict = await self.pipeline.decide(call, self.fetch_context, skip_approval=True)
+        who = f"{approval.id} approved by {approval.decided_by}"
+        if verdict.decision != "ALLOW":
+            record = self._record(call, "DENY", verdict.rule_id,
+                                  f"{who} but blocked at execution: {verdict.reason}")  # fmt: skip
+            event_id = await self.audit.record_decision(record)
+            await self.audit.record_outcome(event_id, AuditOutcome(0.0, 0.0, True, verdict.reason))
+            body = {**approval_view(approval), "status": "blocked", "decision": "DENY",
+                    "rule_id": verdict.rule_id, "reason": verdict.reason,
+                    "executed": False}  # fmt: skip
+            await self.approvals.finish(approval.id, "blocked", body)
+            return body
+
+        started = time.perf_counter()
+        event_id = await self.audit.record_decision(
+            self._record(call, "ALLOW", "human_approved", f"executing {who}: {approval.note or ''}")
+        )
+        result, upstream_ms = await self._forward(call.tool, call.args)
+        text = result_text(result)
+        await self.audit.record_outcome(event_id, AuditOutcome(
+            (time.perf_counter() - started) * 1000, upstream_ms, bool(result.is_error),
+            summarize_result(result.structured_content, text)))  # fmt: skip
+        body = {**approval_view(approval), "status": "executed", "decision": "APPROVED",
+                "executed": not result.is_error,
+                "result": result.structured_content if not result.is_error else None,
+                "error": text if result.is_error else None}  # fmt: skip
+        await self.approvals.finish(approval.id, "executed", body)
+        return body
+
+    def _record(self, call: ToolCall, decision: str, rule_id: str, reason: str) -> DecisionRecord:
+        trace_id, span_id = current_ids()
+        upstream = self._routes[call.tool][0] if call.tool in self._routes else None
+        return DecisionRecord(
+            session_id=self.session_id, upstream=upstream, tool=call.tool, args=call.args,
+            decision=decision,  # type: ignore[arg-type]
+            rule_id=rule_id, reason=reason, trace_id=trace_id, span_id=span_id,
+        )  # fmt: skip
+
+    def refusal(self, tool: str, verdict: Verdict, **extra: Any) -> types.CallToolResult:
         """Structured DENY or ESCALATE for the agent, as JSON text so it can explain it."""
         body: dict[str, Any] = {
             "decision": verdict.decision,
@@ -262,6 +392,7 @@ class Gateway:
         }
         if verdict.decision == "ESCALATE":
             body["note"] = ESCALATE_NOTE
+        body.update(extra)
         return refusal(json.dumps(body))
 
     # --- stats ----------------------------------------------------------------------
@@ -280,6 +411,26 @@ class Gateway:
             "upstream_p50_ms": percentile(upstreams, 50),
             "upstream_p95_ms": percentile(upstreams, 95),
         }
+
+
+def approval_view(approval: Approval) -> dict[str, Any]:
+    """What resolve_approval reports for an approval that was not just executed."""
+    if approval.status in ("executed", "blocked") and approval.result:
+        return dict(approval.result)
+    labels = {"pending": "ESCALATE", "approved": "APPROVED", "executing": "APPROVED",
+              "rejected": "REJECTED", "expired": "EXPIRED"}  # fmt: skip
+    decision = labels.get(approval.status, "DENY")
+    return {
+        "approval_id": approval.id,
+        "status": approval.status,
+        "decision": decision,
+        "tool": approval.tool,
+        "args": approval.args,
+        "reason": approval.reason,
+        "decided_by": approval.decided_by,
+        "note": approval.note,
+        "executed": False,
+    }
 
 
 def refusal(message: str) -> types.CallToolResult:

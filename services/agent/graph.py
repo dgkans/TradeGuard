@@ -1,6 +1,8 @@
-"""Baseline trading agent: understand -> plan -> act (tool loop) -> respond.
+"""Trading agent: understand -> plan -> act (tool loop) -> respond.
 
-This is the `no_guard` configuration: tools go straight to the upstream MCP server.
+Talks to its tools over MCP: directly (the `no_guard` baseline) or through the gateway.
+When the gateway escalates a call, the graph pauses in `await_approval` with a LangGraph
+interrupt and resumes with the human decision's outcome.
 """
 
 import json
@@ -17,6 +19,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
+from langgraph.types import Command, interrupt
 from opentelemetry import trace
 
 from services.agent.prompts import PLAN_PROMPT, SYSTEM_PROMPT, UNDERSTAND_PROMPT, load_prompt
@@ -102,6 +105,36 @@ def build_graph(
             "tool_calls_this_turn": state.get("tool_calls_this_turn", 0) + calls,
         }
 
+    def route_after_tools(state: AgentState) -> Literal["await_approval", "act"]:
+        if pending_escalation(state["messages"]) is not None:
+            return "await_approval"
+        return "act"
+
+    async def await_approval(state: AgentState) -> dict[str, Any]:
+        """Pause until a human decides, then replace the escalation with the outcome."""
+        message = pending_escalation(state["messages"])
+        if message is None:
+            return {}
+        parked = escalation_body(message) or {}
+        payload = {
+            "approval_id": parked.get("approval_id"),
+            "tool": parked.get("tool"),
+            "rule_id": parked.get("rule_id"),
+            "reason": parked.get("reason"),
+            "expires_at": parked.get("expires_at"),
+            "args": tool_call_args(state["messages"], message.tool_call_id),
+        }
+        outcome = interrupt(payload)
+        # Same id: the messages reducer replaces the escalation in place, so the model sees
+        # the call's real final result.
+        updated = ToolMessage(
+            id=message.id,
+            tool_call_id=message.tool_call_id,
+            name=message.name,
+            content=json.dumps(outcome, default=str),
+        )
+        return {"messages": [updated]}
+
     def route_after_act(state: AgentState) -> Literal["tools", "respond"]:
         last = state["messages"][-1]
         wants_tools = isinstance(last, AIMessage) and bool(last.tool_calls)
@@ -140,36 +173,118 @@ def build_graph(
     graph.add_node("plan", plan)
     graph.add_node("act", act)
     graph.add_node("tools", ToolNode(tools))
+    graph.add_node("await_approval", await_approval)
     graph.add_node("respond", respond)
     graph.add_edge(START, "understand")
     graph.add_edge("understand", "plan")
     graph.add_edge("plan", "act")
     graph.add_conditional_edges("act", route_after_act, ["tools", "respond"])
-    graph.add_edge("tools", "act")
+    graph.add_conditional_edges("tools", route_after_tools, ["await_approval", "act"])
+    graph.add_conditional_edges("await_approval", route_after_tools, ["await_approval", "act"])
     graph.add_edge("respond", END)
     return graph.compile(checkpointer=checkpointer)
+
+
+def turn_config(thread_id: str, max_tool_calls: int) -> RunnableConfig:
+    return {
+        "configurable": {"thread_id": thread_id},
+        # Each tool round is two or three steps (act, tools, approval); leave headroom.
+        "recursion_limit": 3 * max_tool_calls + 10,
+    }
 
 
 async def run_turn(
     graph: Runnable[Any, Any], text: str, *, thread_id: str, max_tool_calls: int = 50
 ) -> dict[str, Any]:
-    """Send one user message and return the answer plus the understand and plan outputs."""
-    config: RunnableConfig = {
-        "configurable": {"thread_id": thread_id},
-        # Each tool round is two steps (act, tools); allow headroom beyond the call cap.
-        "recursion_limit": 2 * max_tool_calls + 10,
-    }
+    """Send one user message.
+
+    Returns the answer plus the understand and plan outputs. If the gateway escalated a
+    call, `answer` is None and `pending_approval` holds the interrupt payload: wait for the
+    decision, then call `resume_turn`. Pausing needs a checkpointer.
+    """
     with tracer.start_as_current_span(
         "agent.turn", attributes={"tradeguard.session_id": thread_id}
     ) as span:
-        state = await graph.ainvoke({"messages": [HumanMessage(text)]}, config=config)
+        state = await graph.ainvoke(
+            {"messages": [HumanMessage(text)]}, config=turn_config(thread_id, max_tool_calls)
+        )
         span.set_attribute("tradeguard.request_type", state["request_type"])
+    return turn_result(state)
+
+
+async def resume_turn(
+    graph: Runnable[Any, Any],
+    outcome: dict[str, Any],
+    *,
+    thread_id: str,
+    max_tool_calls: int = 50,
+) -> dict[str, Any]:
+    """Resume a paused turn with the approval outcome from the gateway."""
+    with tracer.start_as_current_span(
+        "agent.resume", attributes={"tradeguard.session_id": thread_id,
+                                    "tradeguard.approval_status": str(outcome.get("status"))}
+    ):  # fmt: skip
+        state = await graph.ainvoke(
+            Command(resume=outcome), config=turn_config(thread_id, max_tool_calls)
+        )
+    return turn_result(state)
+
+
+def turn_result(state: dict[str, Any]) -> dict[str, Any]:
+    interrupts = state.get("__interrupt__") or []
+    pending = interrupts[0].value if interrupts else None
     return {
-        "answer": clean(text_of(state["messages"][-1])),
-        "request_type": state["request_type"],
-        "summary": state["summary"],
-        "plan": state["plan"],
+        "answer": None if pending else clean(text_of(state["messages"][-1])),
+        "pending_approval": pending,
+        "request_type": state.get("request_type"),
+        "summary": state.get("summary"),
+        "plan": state.get("plan"),
     }
+
+
+def escalation_body(message: BaseMessage) -> dict[str, Any] | None:
+    """The gateway's ESCALATE body if this tool message carries a pending approval."""
+    if not isinstance(message, ToolMessage):
+        return None
+    raw = text_of(message).removeprefix("ERROR: ").strip()
+    if not raw.startswith("{"):
+        return None
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    if (
+        body.get("decision") == "ESCALATE"
+        and body.get("approval_id")
+        and (body.get("status") == "pending")
+    ):
+        return body
+    return None
+
+
+def pending_escalation(messages: Sequence[BaseMessage]) -> ToolMessage | None:
+    """First pending escalation among the tool results after the last model message."""
+    tail: list[ToolMessage] = []
+    for message in reversed(messages):
+        if isinstance(message, ToolMessage):
+            tail.append(message)
+        else:
+            break
+    for message in reversed(tail):
+        if escalation_body(message) is not None:
+            return message
+    return None
+
+
+def tool_call_args(messages: Sequence[BaseMessage], call_id: str) -> dict[str, Any]:
+    for message in reversed(messages):
+        if isinstance(message, AIMessage):
+            for call in message.tool_calls:
+                if call["id"] == call_id:
+                    return dict(call["args"])
+    return {}
 
 
 def parse_understanding(raw: str, fallback_summary: str) -> tuple[str, str]:
