@@ -30,6 +30,12 @@ from services.gateway.audit import AuditOutcome, AuditSink, DecisionRecord, summ
 from services.gateway.pipeline.pipeline import Pipeline
 from services.gateway.pipeline.types import PolicyContext, ToolCall, Verdict
 from services.gateway.policy.model import Policy
+from services.gateway.provenance.store import (
+    MemoryProvenanceStore,
+    ProvenanceStore,
+    SessionProvenance,
+)
+from services.gateway.provenance.wrap import wrap_untrusted
 from services.replay_server.bars import MARKET_TZ
 
 UpstreamTarget = MCPServer | Server[Any] | StdioServerParameters | str
@@ -57,6 +63,19 @@ RESOLVE_TOOL_SPEC = types.Tool(
     },
 )
 DEFAULT_APPROVAL_TIMEOUT_S = 300.0
+# Gateway native operator tool: the CLI's code reports each user message (trusted
+# provenance). Listed but hidden from the model; refused without the operator token.
+RECORD_USER_TOOL = "record_user_message"
+RECORD_USER_TOOL_SPEC = types.Tool(
+    name=RECORD_USER_TOOL,
+    description="OPERATOR ONLY. Record the user's message for provenance tracking.",
+    input_schema={
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    },
+)
+OPERATOR_ONLY_NATIVE = (RESOLVE_TOOL, RECORD_USER_TOOL)
 
 
 class GatewayConfigError(Exception):
@@ -82,6 +101,7 @@ class Gateway:
         operator_token: str | None = None,
         approvals: ApprovalStore | None = None,
         approval_timeout_s: float = DEFAULT_APPROVAL_TIMEOUT_S,
+        provenance: ProvenanceStore | None = None,
     ) -> None:
         self.upstreams = upstreams
         self.audit = audit
@@ -91,6 +111,10 @@ class Gateway:
         self.approvals = approvals
         self.approval_timeout_s = approval_timeout_s
         self.pipeline: Pipeline | None = None
+        self.provenance: SessionProvenance | None = None
+        if policy is not None and policy.taint.enabled:
+            # Without an explicit store, keep provenance in this process only.
+            self.provenance = SessionProvenance(session_id, provenance or MemoryProvenanceStore())
         self.tools: list[types.Tool] = []
         self._routes: dict[str, tuple[str, Client]] = {}
         self._timings: list[tuple[float, float]] = []  # (latency_ms, upstream_ms) per call
@@ -119,6 +143,8 @@ class Gateway:
         except BaseException:
             await self._stack.aclose()
             raise
+        if self.provenance is not None:
+            await self.provenance.load()  # a restarted gateway resumes the session's record
         if self.policy is not None:
             schemas = {}
             for tool in self.tools:
@@ -142,6 +168,8 @@ class Gateway:
         tools = list(self.tools)
         if self.approvals is not None:
             tools.append(RESOLVE_TOOL_SPEC)
+        if self.provenance is not None:
+            tools.append(RECORD_USER_TOOL_SPEC)
         return types.ListToolsResult(tools=tools)
 
     async def _call_tool(
@@ -150,10 +178,11 @@ class Gateway:
         meta = params.meta or {}
         token = meta.get(OPERATOR_META_KEY) if isinstance(meta, dict) else None
         args = dict(params.arguments or {})
-        if params.name == RESOLVE_TOOL and self.approvals is not None:
-            if self._operator_ok(token):
-                return await self.resolve(str(args.get("approval_id", "")))
-            return await self.handle(params.name, args, operator_token=token)
+        if params.name == RESOLVE_TOOL and self.approvals is not None and self._operator_ok(token):
+            return await self.resolve(str(args.get("approval_id", "")))
+        recording = params.name == RECORD_USER_TOOL and self.provenance is not None
+        if recording and self._operator_ok(token):
+            return await self.record_user(str(args.get("text", "")))
         return await self.handle(params.name, args, operator_token=token)
 
     # --- pipeline -------------------------------------------------------------------
@@ -163,7 +192,7 @@ class Gateway:
     ) -> Verdict:
         """Unknown tool -> DENY. Operator tool with the right token -> ALLOW. No policy ->
         pass through. Otherwise the policy pipeline decides."""
-        if tool == RESOLVE_TOOL and self.approvals is not None:
+        if tool in OPERATOR_ONLY_NATIVE:
             return Verdict("DENY", "operator_only", f"{tool} needs the session operator token")
         if tool not in self._routes:
             return Verdict("DENY", "unknown_tool", f"no upstream exposes tool {tool!r}")
@@ -171,7 +200,9 @@ class Gateway:
             return Verdict("ALLOW", "operator", "operator tool called with the session token")
         if self.pipeline is None:
             return Verdict("ALLOW", "pass_through", "no policy configured: pass through")
-        return await self.pipeline.decide(ToolCall(tool, args), self.fetch_context)
+        return await self.pipeline.decide(
+            ToolCall(tool, args), self.fetch_context, provenance=self.provenance
+        )
 
     def _operator_ok(self, token: object) -> bool:
         return self.operator_token is not None and token == self.operator_token
@@ -229,6 +260,8 @@ class Gateway:
             verdict = await self.decide(tool, args, operator_token)
             span.set_attribute("tradeguard.decision", verdict.decision)
             span.set_attribute("tradeguard.rule_id", verdict.rule_id)
+            for key, value in verdict.attributes.items():
+                span.set_attribute(key, value)
             upstream_name = self._routes[tool][0] if tool in self._routes else None
             trace_id, span_id = current_ids()
             record = DecisionRecord(
@@ -251,6 +284,7 @@ class Gateway:
                 result = self.refusal(tool, verdict)
             else:
                 result, upstream_ms = await self._forward(tool, args)
+                result = await self._label(tool, result)
 
             latency_ms = (time.perf_counter() - started) * 1000
             text = result_text(result)
@@ -282,6 +316,32 @@ class Gateway:
             except Exception as exc:
                 result = refusal(f"upstream {upstream_name} failed: {type(exc).__name__}: {exc}")
         return result, (time.perf_counter() - started) * 1000
+
+    # --- provenance -----------------------------------------------------------------
+
+    async def record_user(self, text: str) -> types.CallToolResult:
+        """Operator only: record the user's message as trusted provenance."""
+        if self.provenance is None:
+            return refusal("provenance tracking is off")
+        entry = await self.provenance.record_user(text)
+        body = {"recorded": True, "seq": entry.seq}
+        return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(body))])
+
+    async def _label(self, tool: str, result: types.CallToolResult) -> types.CallToolResult:
+        """Record a forwarded result in provenance and wrap it if it is untrusted."""
+        if self.provenance is None or self.policy is None or result.is_error:
+            return result
+        trust = self.policy.taint.trust_of(tool)
+        payload: Any = result.structured_content
+        text = json.dumps(payload, default=str) if payload is not None else result_text(result)
+        await self.provenance.record_tool(tool, trust, text)
+        if trust != "untrusted" or not self.policy.taint.wrap_untrusted:
+            return result
+        wrapped = wrap_untrusted(tool, payload if payload is not None else text)
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps(wrapped))],
+            structured_content=wrapped,
+        )
 
     # --- approvals ------------------------------------------------------------------
 
@@ -342,7 +402,9 @@ class Gateway:
         call = ToolCall(approval.tool, approval.args)
         verdict = Verdict("ALLOW", "human_approved", "no policy configured")
         if self.pipeline is not None:
-            verdict = await self.pipeline.decide(call, self.fetch_context, skip_approval=True)
+            verdict = await self.pipeline.decide(
+                call, self.fetch_context, skip_approval=True, provenance=self.provenance
+            )
         who = f"{approval.id} approved by {approval.decided_by}"
         if verdict.decision != "ALLOW":
             record = self._record(call, "DENY", verdict.rule_id,

@@ -5,6 +5,7 @@ silently leaving a limit unset.
 """
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -35,6 +36,25 @@ class ToolAllowlist(BaseModel):
         return self
 
 
+Trust = Literal["trusted", "untrusted"]
+
+
+class TaintConfig(BaseModel):
+    """Provenance and taint tracking (F7). Off unless the policy turns it on."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    wrap_untrusted: bool = True
+    high_risk_threshold: float = Field(default=0.5, ge=0, le=1)
+    # Tools not listed here get default_trust. Fail closed: unknown output is untrusted.
+    default_trust: Trust = "untrusted"
+    trust_labels: dict[str, Trust] = Field(default_factory=dict)
+
+    def trust_of(self, tool: str) -> Trust:
+        return self.trust_labels.get(tool, self.default_trust)
+
+
 class Policy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -51,6 +71,7 @@ class Policy(BaseModel):
     tool_allowlist: ToolAllowlist
     # Tools only the human operator may call (with the session operator token).
     operator_tools: list[str] = Field(default_factory=list)
+    taint: TaintConfig = Field(default_factory=TaintConfig)
 
     @field_validator("allowed_symbols")
     @classmethod

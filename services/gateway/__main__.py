@@ -28,6 +28,11 @@ from services.gateway.mcp_proxy.proxy import (
     Upstream,
 )
 from services.gateway.policy.model import Policy, PolicyError, load_policy
+from services.gateway.provenance.store import (
+    MemoryProvenanceStore,
+    PostgresProvenanceStore,
+    ProvenanceStore,
+)
 
 
 async def serve(args: argparse.Namespace) -> int:
@@ -47,15 +52,18 @@ async def serve(args: argparse.Namespace) -> int:
         async with AsyncExitStack() as stack:
             audit: AuditSink
             approvals: ApprovalStore
+            provenance: ProvenanceStore
             if args.audit == "memory":
                 memory_audit = MemoryAuditSink()
                 audit = memory_audit
                 approvals = MemoryApprovalStore(audit=memory_audit)
+                provenance = MemoryProvenanceStore()
             else:
                 url = settings.database_url.get_secret_value()
                 await check_schema(url)
                 audit = await stack.enter_async_context(PostgresAuditSink(url))
                 approvals = await stack.enter_async_context(PostgresApprovalStore(url))
+                provenance = await stack.enter_async_context(PostgresProvenanceStore(url))
             gateway = await stack.enter_async_context(
                 Gateway(
                     [upstream],
@@ -65,6 +73,7 @@ async def serve(args: argparse.Namespace) -> int:
                     operator_token=os.environ.get(OPERATOR_TOKEN_ENV) or None,
                     approvals=approvals,
                     approval_timeout_s=settings.approval_timeout_seconds,
+                    provenance=provenance,
                 )
             )
             policy_name = policy.name if policy else "none (pass through)"

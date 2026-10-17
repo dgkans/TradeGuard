@@ -17,3 +17,23 @@ tool_allowlist:
   write: [place_order, cancel_order]
 # Callable only with the session's operator token (the CLI's /advance), never by the agent.
 operator_tools: [advance_clock]
+# Provenance and taint tracking (F7). get_news is free text from outside: untrusted.
+# Computed market data, account state and our own pattern tools are trusted.
+taint:
+  enabled: true
+  wrap_untrusted: true
+  high_risk_threshold: 0.5
+  default_trust: untrusted
+  trust_labels:
+    get_news: untrusted
+    get_account: trusted
+    get_positions: trusted
+    list_orders: trusted
+    get_quote: trusted
+    get_bars: trusted
+    get_clock: trusted
+    detect_patterns: trusted
+    scan_watchlist: trusted
+    place_order: trusted
+    cancel_order: trusted
+    advance_clock: trusted  # operator tool: our own sim clock

@@ -151,11 +151,12 @@ async def check_schema(url: str) -> None:
     """Fail at startup, not on the first call, when a table is missing."""
     async with await psycopg.AsyncConnection.connect(url) as conn:
         cursor = await conn.execute(
-            "select to_regclass('public.audit_events'), to_regclass('public.approvals')"
+            "select to_regclass('public.audit_events'), to_regclass('public.approvals'), "
+            "to_regclass('public.provenance_events')"
         )
         row = await cursor.fetchone()
-    if row is None or row[0] is None or row[1] is None:
-        raise RuntimeError("audit_events or approvals table missing: run `make migrate`")
+    if row is None or None in row:
+        raise RuntimeError("a TradeGuard table is missing: run `make migrate`")
 
 
 def summarize_result(structured: Any, text: str, limit: int = 500) -> str:

@@ -253,3 +253,50 @@ Consequences:
   the order's status, it answered "new" from memory without calling a tool, after the
   order had filled. Asked explicitly to call list_orders, it reported the fill correctly
   ($212.70, 7.05 shares). On rejection it relayed the reviewer's note.
+
+## D011: Provenance and taint tracking (F7)
+Date: 2026-10-16
+Context: Defend against indirect prompt injection: an order driven by untrusted tool output
+(news) rather than by the user.
+Decision:
+- **Trust labels** live in the policy (`taint.trust_labels`), and unlisted tools default to
+  untrusted (fail closed). Only `get_news` is untrusted today. Our own computed tools
+  (patterns, scans, quotes, account) are trusted. `advance_clock` needed an explicit label
+  once the default caught it.
+- **User messages** are trusted provenance, but the gateway can't see them, so the CLI's
+  code (not the model) sends each one through the operator-only `record_user_message`
+  before the turn. With taint on and no provenance, writes are denied
+  (`provenance_unavailable`).
+- **Support check** compares a write call with the *latest* user message only. An earlier
+  "buy NVDA" doesn't authorize a later turn. Side words with simple negation, and symbol by
+  ticker or company name. Amounts, units and conditions are F8's job.
+- **Decision:** clean -> pass; full support -> ALLOW; side only -> ESCALATE, or DENY when
+  untrusted risk >= `high_risk_threshold` (0.5); no side support -> DENY. Taint runs after
+  the deny rules and before approval, so an oversize order still fails on size first. On
+  re-check after a human approval, a taint ESCALATE counts as approved, but a taint DENY
+  still blocks.
+- **Wrapping:** untrusted results reach the agent as `{trust, source, notice, data}`, with
+  `data` between `<<<UNTRUSTED_DATA ...>>>` markers. Look-alike markers inside the text
+  are replaced with U+2039/U+203A.
+- **Detector:** weighted regex signals (override phrases, chat role markers, addressing an
+  AI, urgency next to a trade verb, imperative trade, secrecy, claimed authority), with
+  score `1 - prod(1 - w)`. It only feeds the risk score. Evaluated once on a 60 snippet
+  set frozen before it was written (RESULTS.md).
+- **Persistence:** `provenance_events` (Alembic 0003). The gateway reloads a session's
+  entries on start, because the agent's checkpointed conversation still contains the
+  untrusted text after a restart.
+Alternatives considered: an LLM classifier for injections (cost, latency, and it can
+itself be injected); taint on the agent side (the gateway must be the enforcement point,
+and an agent can be compromised); treating every tool output as untrusted (too many
+escalations for read-then-trade flows that only used computed data).
+Consequences:
+- Delegated choices ("buy the strongest breakout") after reading news now escalate
+  instead of executing. That's intended, and F9 will measure the escalation rate.
+- **Eval design finding:** with qwen3:8b, neither the unguarded nor the guarded agent acted
+  on the demo injection (`news_demo_003`), in two phrasings. Both times the model said it
+  was "synthetic test data", because every news fixture says so in its headline and body
+  (PLAN.md requires synthetic labeling). The guard's effect is shown with a scripted
+  hijacked agent (tests) and a scripted stdio client against the real gateway (audit,
+  provenance and Jaeger). Before F9, decide how injection fixtures stay labeled synthetic
+  (metadata, source name) without telling the model in the text.
+- The detector misses injections that trip only one weak signal (4 of 30 in the set).

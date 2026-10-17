@@ -9,7 +9,7 @@
 | F4 Gateway proxy | done | 2026-10-16 |
 | F5 Policy engine | done | 2026-10-16 |
 | F6 Approval flow | done | 2026-10-16 |
-| F7 Taint tracking | in progress | |
+| F7 Taint tracking | done | 2026-10-16 |
 | F8 Intent alignment | not started | |
 | F9 Eval harness | not started | |
 | F10 Dashboard | not started | |
@@ -216,11 +216,18 @@
 - Labeled set of 60 snippets (30 injection, 30 benign including hard negatives), written and hashed *before* the detector exists; precision and recall from one run go into RESULTS.md, with no tuning on that set.
 - Demo: demo scenario with "Check the latest news on NVDA and tell me if anything matters", once direct (no guard) and once guarded, with qwen3:8b. Report what actually happens.
 ### Acceptance
-- [ ] Order triggered only by an injected news item is denied (tested)
-- [ ] Order the user explicitly requested is allowed even if news was read earlier (tested)
-- [ ] Detector has precision and recall reported on a labeled set of at least 50 snippets
-- [ ] Taint decisions visible in audit log and traces
+- [x] Order triggered only by an injected news item is denied (tested: rule, gateway, scripted hijacked agent; verified with a scripted client over the stdio gateway, session `f7-hijack`)
+- [x] Order the user explicitly requested is allowed even if news was read earlier (tested at the same three levels; verified in `f7-hijack`)
+- [x] Detector has precision and recall reported on a labeled set of at least 50 snippets (60 snippets: precision 1.0, recall 0.867, one run, in RESULTS.md with caveats)
+- [x] Taint decisions visible in audit log and traces (reasons in `audit_events`, `tradeguard.taint.*` attributes, tested and checked in Jaeger)
 ### Notes and open questions
 - Labeled set `evals/datasets/injection_snippets.jsonl` (60 rows: 30 injection, 30 benign) frozen before any detector code was written: sha256 `dbed25a392e39c43855de2a7149679431b699a4df28c7bb1fed619279f14cc70`. The same author wrote the set and the detector, which biases results upward; the number is a sanity check, not a claim about real world injections.
+- Test setup fixes: a hijacked sell of 10 NVDA (about $2127) hit the order size cap before taint; the tests now sell 5 so the taint rule is what fires, and the agent level test asserts the rule id. The F5 pipeline tests now run with taint off (taint has its own tests, plus a fail closed test for taint on without provenance).
+- Real model demo (qwen3:8b): neither the direct nor the guarded agent acted on the demo injection, in two phrasings. The model called it "synthetic test data", because the fixtures say so in the text. See D011; needs a decision before F9.
+- Ruff SIM110 disabled project wide: it conflicts with PLAN.md Section 8 (explicit loops).
 ### Loop summary
--
+- Built: trust labels in policy, provenance store (memory and Postgres, reload on restart), operator-only `record_user_message` called by the CLI, injection signal detector, support check, taint rule as pipeline stage 4 (also re-checked after approval), untrusted result wrapping, taint span attributes, `evals/detector_eval.py`.
+- Tests: 253 passing (38 new for F7); ruff and mypy strict clean.
+- Numbers: detector precision 1.0, recall 0.867 on 60 self-written snippets (optimistic, see RESULTS.md caveats).
+- Gaps: the support check is keyword based (F8 adds amounts, units and an LLM judge); the detector misses single-weak-signal injections; the real model wasn't fooled by our labeled fixtures, so the baseline contrast is unproven.
+- Next: F8 Intent alignment (the plan suggests opusplan).

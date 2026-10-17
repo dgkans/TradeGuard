@@ -25,7 +25,7 @@ from services.agent.prompts import SYSTEM_PROMPT
 
 # Operator controls that the model must never be able to call. Hiding them here is a
 # convenience; the gateway refuses them without the operator token regardless.
-DEV_ONLY_TOOLS = frozenset({"advance_clock", "resolve_approval"})
+DEV_ONLY_TOOLS = frozenset({"advance_clock", "resolve_approval", "record_user_message"})
 
 McpTarget = MCPServer | Server[Any] | StdioServerParameters | str
 tracer = trace.get_tracer("tradeguard.agent")

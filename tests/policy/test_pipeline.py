@@ -8,10 +8,13 @@ import pytest
 from services.gateway.pipeline import rules
 from services.gateway.pipeline.pipeline import Pipeline
 from services.gateway.pipeline.types import PolicyContext, ToolCall
-from services.gateway.policy.model import load_policy
+from services.gateway.policy.model import TaintConfig, load_policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-POLICY = load_policy(REPO_ROOT / "policies/default.yaml")
+# These tests cover stages 1, 2, 3 and 6. Taint (stage 4) is tested in tests/provenance.
+POLICY = load_policy(REPO_ROOT / "policies/default.yaml").model_copy(
+    update={"taint": TaintConfig(enabled=False)}
+)
 PLACE_ORDER_SCHEMA = {
     "type": "object",
     "properties": {
@@ -123,3 +126,13 @@ async def test_cancel_order_is_allowed_by_allowlist() -> None:
 async def test_tool_without_known_schema_is_denied() -> None:
     verdict = await decide("list_orders", {})  # allowlisted, but no schema registered
     assert (verdict.decision, verdict.rule_id) == ("DENY", "schema_unknown")
+
+
+async def test_taint_on_without_provenance_denies_writes() -> None:
+    tainted = load_policy(REPO_ROOT / "policies/default.yaml")
+    pipeline = Pipeline(tainted, SCHEMAS)
+    order = ToolCall("place_order", {"symbol": "AMD", "side": "buy", "notional": 500})
+    verdict = await pipeline.decide(order, Fetcher())
+    assert (verdict.decision, verdict.rule_id) == ("DENY", "provenance_unavailable")
+    read = await pipeline.decide(ToolCall("get_quote", {"symbol": "AMD"}), Fetcher())
+    assert read.decision == "ALLOW"

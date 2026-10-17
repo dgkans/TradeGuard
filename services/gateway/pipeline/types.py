@@ -1,6 +1,6 @@
 """Value types shared by the pipeline stages and rules."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Decision = Literal["ALLOW", "DENY", "ESCALATE"]
@@ -45,3 +45,4 @@ class Verdict:
     decision: Decision
     rule_id: str
     reason: str
+    attributes: dict[str, Any] = field(default_factory=dict)  # extra span attributes

@@ -26,6 +26,7 @@ from mcp.client.stdio import StdioServerParameters
 from services.agent.approvals import wait_for_decision
 from services.agent.graph import AgentContext, build_graph, resume_turn, run_turn
 from services.agent.llm import make_chat_model
+from services.agent.provenance import report_user_message
 from services.agent.tools import McpToolset, ToolCallLog
 from services.common.config import ConfigError, Settings, child_env, load_settings
 from services.common.telemetry import setup_tracing
@@ -72,7 +73,8 @@ async def chat(args: argparse.Namespace, settings: Settings) -> int:
             print(f"session {session_id} | scenario {scenario.id} | model {model} | {route} "
                   "| paper/replay only")  # fmt: skip
             print(f"tool log: {log.path}")
-            turn = Turn(graph, toolset, session_id, operator_meta, settings)
+            turn = Turn(graph, toolset, session_id, operator_meta, settings,
+                        guarded=not args.direct)  # fmt: skip
             if args.once:
                 print(f"\nyou> {args.once}")
                 await turn.send(args.once)
@@ -83,8 +85,16 @@ async def chat(args: argparse.Namespace, settings: Settings) -> int:
 class Turn:
     """Runs one user message, including any pause for human approval."""
 
-    def __init__(self, graph: Any, toolset: McpToolset, session_id: str,
-                 operator_meta: dict[str, Any], settings: Settings) -> None:  # fmt: skip
+    def __init__(
+        self,
+        graph: Any,
+        toolset: McpToolset,
+        session_id: str,
+        operator_meta: dict[str, Any],
+        settings: Settings,
+        guarded: bool,
+    ) -> None:
+        self.guarded = guarded
         self.graph = graph
         self.toolset = toolset
         self.session_id = session_id
@@ -92,6 +102,9 @@ class Turn:
         self.settings = settings
 
     async def send(self, text: str) -> None:
+        if self.guarded:
+            # Trusted provenance for the taint rule: sent by this code, not by the model.
+            await report_user_message(self.toolset, text, self.operator_meta)
         result = await run_turn(self.graph, text, thread_id=self.session_id)
         print(f"[understand: {result['request_type']} | {result['summary']}]")
         while result["pending_approval"]:

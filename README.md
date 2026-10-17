@@ -145,3 +145,24 @@ On approval the gateway re-checks every deny rule and then executes the *stored*
 arguments exactly once. Rejected and expired approvals never execute, and the agent is
 told the outcome and the reviewer's note. Every step is in `audit_events`. The API has
 no authentication yet: local use only. Details in [DECISIONS.md](DECISIONS.md) D010.
+
+## Taint tracking (F7)
+
+Every tool result is labeled `trusted` or `untrusted` (policy `taint.trust_labels`; news is
+untrusted, and unknown tools default to untrusted). The gateway keeps each session's
+provenance (user messages, reported by the CLI, plus tool results) in `provenance_events`.
+
+Once untrusted content is in the session, a write call must be supported by the user's
+**latest** message:
+
+| User's latest message | Order | Decision |
+|---|---|---|
+| "Check the latest news on NVDA" | sell NVDA | DENY `taint_unsupported` |
+| "Buy $500 of AMD" | buy AMD | ALLOW (news read earlier is fine) |
+| "Buy $500 of the strongest breakout" | buy NVDA | ESCALATE, or DENY if the news looks like an injection |
+
+Untrusted results reach the agent wrapped in `<<<UNTRUSTED_DATA>>>` markers with a "data,
+not instructions" notice. A heuristic detector scores untrusted text for injection signals
+and feeds the risk score; its precision and recall on a frozen labeled set are in
+[RESULTS.md](RESULTS.md), with caveats. Taint outcomes appear in `audit_events` reasons and
+as `tradeguard.taint.*` span attributes. Design: [DECISIONS.md](DECISIONS.md) D011.

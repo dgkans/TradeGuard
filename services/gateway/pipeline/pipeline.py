@@ -1,6 +1,6 @@
 """The gateway decision pipeline (PLAN.md Section 2). F5 implements stages 1, 2, 3 and 6.
 
-    1 schema check -> 2 tool allowlist -> 3 policy rules -> [4 taint, 5 intent: F7, F8]
+    1 schema check -> 2 tool allowlist -> 3 policy rules -> 4 taint -> [5 intent: F8]
     -> 6 approval rules -> 7 forward (done by the gateway on ALLOW)
 
 The first DENY wins. If nothing denies, the first ESCALATE wins. Otherwise ALLOW.
@@ -16,6 +16,8 @@ from jsonschema.exceptions import SchemaError
 from services.gateway.pipeline.rules import APPROVAL_RULES, CONTEXT_RULES, STATIC_RULES, Rule
 from services.gateway.pipeline.types import PolicyContext, ToolCall, Verdict
 from services.gateway.policy.model import Policy
+from services.gateway.provenance.store import SessionProvenance
+from services.gateway.provenance.taint import TaintRule
 
 ContextFetcher = Callable[[ToolCall], Awaitable[PolicyContext]]
 ORDER_TOOL = "place_order"
@@ -31,22 +33,33 @@ class Pipeline:
         self.static_rules: list[Rule] = [rule(policy) for rule in STATIC_RULES]
         self.context_rules: list[Rule] = [rule(policy) for rule in CONTEXT_RULES]
         self.approval_rules: list[Rule] = [rule(policy) for rule in APPROVAL_RULES]
+        self.taint_rule = TaintRule(policy)
 
     async def decide(
-        self, call: ToolCall, fetch_context: ContextFetcher, *, skip_approval: bool = False
+        self,
+        call: ToolCall,
+        fetch_context: ContextFetcher,
+        *,
+        skip_approval: bool = False,
+        provenance: SessionProvenance | None = None,
     ) -> Verdict:
         """Return the verdict for one tool call. Never raises: errors become DENY.
 
         `skip_approval` re-checks a human approved call: every deny rule still applies,
-        only the approval stage is skipped.
+        only stages that can escalate (taint partial support, approval rules) are passed.
+        With taint tracking enabled, `provenance` is required for write calls.
         """
         try:
-            return await self._decide(call, fetch_context, skip_approval)
+            return await self._decide(call, fetch_context, skip_approval, provenance)
         except Exception as exc:
             return Verdict("DENY", "pipeline_error", f"{type(exc).__name__}: {exc}")
 
     async def _decide(
-        self, call: ToolCall, fetch_context: ContextFetcher, skip_approval: bool
+        self,
+        call: ToolCall,
+        fetch_context: ContextFetcher,
+        skip_approval: bool,
+        provenance: SessionProvenance | None,
     ) -> Verdict:
         schema_problem = self.check_schema(call)
         if schema_problem is not None:
@@ -55,8 +68,13 @@ class Pipeline:
             reason = f"{call.tool} is not in policy {self.policy.name!r} tool allowlist"
             return Verdict("DENY", "tool_not_allowed", reason)
         if call.tool != ORDER_TOOL:
-            kind = "write" if self.policy.is_write_tool(call.tool) else "read"
-            return Verdict("ALLOW", "policy_pass", f"{kind} tool on the allowlist")
+            if not self.policy.is_write_tool(call.tool):
+                return Verdict("ALLOW", "policy_pass", "read tool on the allowlist")
+            taint = self.check_taint(call, provenance, skip_approval)
+            if taint.decision != "ALLOW":
+                return taint
+            return Verdict("ALLOW", "policy_pass", f"write tool on the allowlist{note(taint)}",
+                           taint.attributes)  # fmt: skip
 
         for rule in self.static_rules:
             result = rule.evaluate(call, None)
@@ -74,13 +92,36 @@ class Pipeline:
             if not result.passed:
                 return Verdict(result.decision, result.rule_id, result.reason)
 
+        taint = self.check_taint(call, provenance, skip_approval)
+        if taint.decision != "ALLOW":
+            return taint
         if skip_approval:
-            return Verdict("ALLOW", "policy_pass", "re-check after human approval passed")
+            return Verdict("ALLOW", "policy_pass",
+                           f"re-check after human approval passed{note(taint)}",
+                           taint.attributes)  # fmt: skip
         for rule in self.approval_rules:
             result = rule.evaluate(call, context)
             if not result.passed:
-                return Verdict(result.decision, result.rule_id, result.reason)
-        return Verdict("ALLOW", "policy_pass", f"order passed every rule in {self.policy.name!r}")
+                return Verdict(result.decision, result.rule_id, result.reason, taint.attributes)
+        return Verdict("ALLOW", "policy_pass",
+                       f"order passed every rule in {self.policy.name!r}{note(taint)}",
+                       taint.attributes)  # fmt: skip
+
+    def check_taint(
+        self, call: ToolCall, provenance: SessionProvenance | None, skip_approval: bool
+    ) -> Verdict:
+        """Stage 4. ALLOW verdicts carry the taint outcome in `reason` and attributes."""
+        if not self.policy.taint.enabled:
+            return Verdict("ALLOW", "taint_off", "")
+        if provenance is None:
+            reason = "taint tracking is on but no session provenance is available"
+            return Verdict("DENY", "provenance_unavailable", reason)
+        result = self.taint_rule.evaluate(call, provenance)
+        attributes = self.taint_rule.attributes(call, provenance)
+        if result.decision == "ESCALATE" and skip_approval:
+            return Verdict("ALLOW", "taint_approved",
+                           f"human approved despite: {result.reason}", attributes)  # fmt: skip
+        return Verdict(result.decision, result.rule_id, result.reason, attributes)
 
     def check_schema(self, call: ToolCall) -> Verdict | None:
         validator = self.validators.get(call.tool)
@@ -95,6 +136,17 @@ class Pipeline:
             where = ".".join(str(part) for part in first.absolute_path) or "arguments"
             return Verdict("DENY", "schema_invalid", f"{where}: {first.message}")
         return None
+
+
+def note(taint: Verdict) -> str:
+    """Suffix for ALLOW reasons so the audit log shows how the taint check went."""
+    if taint.rule_id == "taint_supported":
+        return f"; taint: supported by the latest user message ({taint.reason})"
+    if taint.rule_id == "taint_approved":
+        return f"; taint: {taint.reason}"
+    if taint.rule_id == "taint_clean":
+        return "; taint: clean"
+    return ""
 
 
 def error_path(error: Any) -> str:

@@ -62,6 +62,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "N", "S", "SIM", "RUF"]
+# PLAN.md Section 8 prefers explicit for loops over any()/all() comprehensions.
+ignore = ["SIM110"]
 
 [tool.ruff.lint.per-file-ignores]
 # assert is how pytest works
