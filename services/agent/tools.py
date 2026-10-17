@@ -17,14 +17,17 @@ from typing import Any
 from langchain_core.tools import BaseTool, StructuredTool
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
+from mcp.server.lowlevel import Server
 from mcp.server.mcpserver import MCPServer
+from opentelemetry import trace
 
 from services.agent.prompts import SYSTEM_PROMPT
 
 # Operator controls that the model must never be able to call.
 DEV_ONLY_TOOLS = frozenset({"advance_clock"})
 
-McpTarget = MCPServer | StdioServerParameters | str
+McpTarget = MCPServer | Server[Any] | StdioServerParameters | str
+tracer = trace.get_tracer("tradeguard.agent")
 
 
 class ToolCallLog:
@@ -127,10 +130,14 @@ class McpToolset:
     def _make_tool(self, name: str, description: str, schema: dict[str, Any]) -> BaseTool:
         async def invoke(**kwargs: Any) -> str:
             started = time.perf_counter()
-            try:
-                result, error = await self._raw_call(name, kwargs)
-            except Exception as exc:  # transport failures reach the model as errors too
-                result, error = None, f"{type(exc).__name__}: {exc}"
+            with tracer.start_as_current_span(
+                "agent.tool_call", attributes={"tradeguard.tool": name}
+            ) as span:
+                try:
+                    result, error = await self._raw_call(name, kwargs)
+                except Exception as exc:  # transport failures reach the model as errors too
+                    result, error = None, f"{type(exc).__name__}: {exc}"
+                span.set_attribute("tradeguard.tool_error", error is not None)
             self.log.record(name, kwargs, result, error, (time.perf_counter() - started) * 1000)
             if error is not None:
                 return f"ERROR: {error}"

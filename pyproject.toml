@@ -5,17 +5,21 @@ description = "Safety and evaluation gateway for trading agents. Paper and repla
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "alembic>=1.16",
     "langchain-core>=1.6",
     "langchain-ollama>=1.1",
     "langgraph>=1.2",
     "langgraph-checkpoint-postgres>=3.2",
     "mcp>=2.3",
+    "opentelemetry-exporter-otlp-proto-http>=1.36",
+    "opentelemetry-sdk>=1.36",
     "pandas>=2.2",
     "psycopg[binary]>=3.3",
     "pyarrow>=21",
     "pydantic>=2.11",
     "python-dotenv>=1.1",
     "pyyaml>=6",
+    "sqlalchemy>=2.0",
     "yfinance>=1.7",
 ]
 

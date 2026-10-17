@@ -1,4 +1,4 @@
-.PHONY: help install up down logs ps check-config test lint format typecheck check fixtures replay replay-http inspector
+.PHONY: help install up down logs ps check-config test lint format typecheck check fixtures replay replay-http inspector migrate jaeger bench-gateway
 
 help:
 	@echo "install       uv sync (Python deps + dev tools)"
@@ -13,6 +13,9 @@ help:
 	@echo "replay        replay MCP server on stdio (SCENARIO=demo)"
 	@echo "replay-http   replay MCP server on http://127.0.0.1:8001/mcp with dev tools"
 	@echo "inspector     open the MCP Inspector in the browser against the replay server"
+	@echo "migrate       apply database migrations (alembic upgrade head)"
+	@echo "jaeger        run local Jaeger (UI http://localhost:16686, OTLP :4317/:4318)"
+	@echo "bench-gateway measure gateway overhead: direct vs through the gateway"
 
 install:
 	uv sync
@@ -66,3 +69,13 @@ replay-http:
 
 inspector:
 	npx -y @modelcontextprotocol/inspector@2.11.0 uv run python -m services.replay_server --scenario $(SCENARIO) --dev-tools
+
+migrate:
+	uv run alembic upgrade head
+
+# Local Jaeger without Docker: official release binary, sha256 verified (DECISIONS.md D008).
+jaeger:
+	./.tools/jaeger
+
+bench-gateway:
+	uv run python -m services.gateway.bench --calls 300

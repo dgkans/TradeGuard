@@ -19,11 +19,13 @@ for the agent.
 cp .env.example .env     # every variable is documented in the file
 make install             # Python 3.12 + deps via uv
 make up                  # Postgres, Jaeger, OTel Collector; waits for healthchecks
+                         #   (no Docker? brew Postgres + `make jaeger`, see below)
+make migrate             # create audit_events and other tables
 make check               # ruff, mypy, pytest (same as CI)
 ```
 
 - Jaeger UI: http://localhost:16686
-- OTLP: `localhost:4317` (gRPC), `localhost:4318` (HTTP)
+- OTLP: `localhost:4318` (HTTP, used by TradeGuard), `localhost:4317` (gRPC)
 - Postgres: `localhost:5432`
 
 `make check-config` validates your `.env`. It exits non zero with the offending variable
@@ -60,8 +62,9 @@ and the timestamps of the bars that support it. Rules are in
 
 ## Baseline agent (F3, no guard)
 
-A LangGraph agent, `understand -> plan -> act (tool loop) -> respond`, that talks to the
-replay server over MCP. This is the `no_guard` baseline: nothing checks its orders yet.
+A LangGraph agent, `understand -> plan -> act (tool loop) -> respond`, that talks to its
+tools over MCP. Since F4 it goes through the gateway by default. `--direct` skips the
+gateway: that's the `no_guard` baseline.
 
 ```bash
 uv run tradeguard chat --scenario demo                      # interactive
@@ -74,3 +77,26 @@ In chat, `/advance N` moves the simulated clock (the agent cannot), `/clock` sho
 defaults to `ollama:qwen3:8b` (see `LLM_PROVIDER` and `LLM_MODEL` in `.env.example`).
 Conversations resume after a restart, but the replay account starts fresh in each process
 ([DECISIONS.md](DECISIONS.md) D007).
+
+## Gateway (F4, pass through)
+
+```
+tradeguard chat --stdio--> gateway (MCP server + client) --stdio--> replay server
+                               |-> Postgres audit_events (written before forwarding)
+                               '-> OTLP traces -> Jaeger
+```
+
+Every tool call is written to `audit_events` (session, tool, args, decision, rule,
+timings, result summary, trace id) *before* it is forwarded. If that write fails, the call
+is denied. F4 allows every known tool (`rule_id=pass_through`); the policy engine arrives
+in F5.
+
+```bash
+make jaeger                                       # local Jaeger, no Docker needed
+uv run tradeguard chat --scenario demo --session s1
+uv run tradeguard gateway-stats --session s1      # p50 / p95 overhead from audit_events
+make bench-gateway                                # direct vs gateway latency, JSON report
+```
+
+Traces show `agent.turn > agent.tool_call > gateway.decision > gateway.upstream_call > replay
+tools/call` across the three processes. Measured overhead is in [RESULTS.md](RESULTS.md).

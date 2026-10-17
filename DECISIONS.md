@@ -129,3 +129,46 @@ Consequences:
   qwen3:8b listed NVDA without noting `holding_above_high: false`. Asked to buy the
   strongest breakout, it chose AMD correctly. The system prompt is left unchanged (v1)
   so the baseline isn't tuned before scenarios exist (PLAN.md 7.4).
+
+## D008: Gateway proxy design (F4)
+Date: 2026-10-16
+Context: F4 inserts the gateway between agent and tools without changing behavior, with an
+audit trail, traces and measured overhead.
+Decision:
+- **Server side:** the MCP SDK's low-level `Server` (`on_list_tools` / `on_call_tool`), so
+  upstream tool schemas pass through byte for byte. `MCPServer` derives schemas from Python
+  signatures, which a proxy doesn't have. **Client side:** one MCP `Client` per upstream.
+  A tool name exposed by two upstreams stops startup (F11 will map names explicitly).
+- **Fail closed:** the decision row is written to `audit_events` *before* forwarding. If
+  that write fails, the call is denied and never reaches the upstream. The outcome row is
+  written after. If only that second write fails, the result is still returned (the call
+  already ran) and the span is flagged. Unknown tools are a DENY with `rule_id=unknown_tool`.
+  If Postgres or the table is missing at startup, the gateway refuses to start.
+- **Policy hook:** `Gateway.decide(tool, args) -> Verdict`. F4 returns ALLOW /
+  `pass_through`; F5 replaces it with the pipeline.
+- **Overhead:** `overhead_ms = gateway handling time - upstream time` per call, stored in
+  `audit_events` and summarized by `tradeguard gateway-stats` and on gateway exit. A
+  separate client side benchmark (`make bench-gateway`) measures what the extra hop costs
+  end to end.
+- **Tracing:** OTLP/HTTP to `:4318`. The MCP SDK 2.x already injects and extracts
+  `traceparent` in request `_meta` and opens CLIENT and SERVER spans. TradeGuard adds
+  `agent.turn`, `agent.tool_call`, `gateway.decision` (with `tradeguard.decision`,
+  `rule_id`, `tool`, `session_id`, `overhead_ms`) and `gateway.upstream_call`. Results are
+  not put in span attributes, so account data stays out of traces.
+- **Child process env:** MCP stdio children only get a minimal env allowlist, which
+  silently dropped shell settings such as `DATABASE_URL` and `OTEL_*`. `child_env()`
+  forwards exactly the variables `Settings` knows plus `OTEL_*`. `OTEL_SDK_DISABLED=true`
+  is the explicit off switch, because an empty endpoint falls back to the default. Both
+  were found while benchmarking, and both have regression tests.
+- **Local Jaeger:** the official v2.21.0 darwin-arm64 release binary in `.tools/`
+  (sha256 checked against the release's checksum file), because there's no Homebrew
+  formula and no Docker. The compose file is pinned to the same version.
+Alternatives considered: in-process gateway as a LangChain tool wrapper (not an MCP
+boundary, so a buggy agent could bypass it); one write per call after forwarding (not fail
+closed); Postgres via SQLAlchemy ORM (more code than two SQL statements; Alembic still owns
+the schema).
+Consequences:
+- The gateway still exposes `advance_clock` when started with `--dev-tools`, because the
+  CLI's `/advance` goes through the same gateway. Only the agent side toolset hides it. F5's
+  tool allowlist must deny it to the agent; operator calls need their own channel or marker.
+- `audit_events.decision` already allows ESCALATE for F6.

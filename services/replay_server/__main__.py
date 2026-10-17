@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from services.common.config import ConfigError, load_settings
+from services.common.telemetry import setup_tracing
 from services.replay_server.scenario import ScenarioError, load_scenario
 from services.replay_server.server import build_server
 from services.replay_server.session import ReplaySession
@@ -28,23 +29,28 @@ def main(argv: list[str] | None = None) -> int:
 
     # Messages go to stderr: on stdio, stdout belongs to the MCP protocol.
     try:
-        load_settings()
+        settings = load_settings()
         scenario = load_scenario(args.scenario, args.scenarios_root)
         session = ReplaySession(scenario, bars_root=args.bars_root, news_root=args.news_root)
     except (ConfigError, ScenarioError, FileNotFoundError, ValueError) as exc:
         print(f"replay_server: {exc}", file=sys.stderr)
         return 2
 
+    provider = setup_tracing("tradeguard-replay", settings)
     server = build_server(session, dev_tools=args.dev_tools)
     print(
         f"replay_server: scenario={scenario.id} start={scenario.start_time.isoformat()} "
         f"transport={args.transport}",
         file=sys.stderr,
     )
-    if args.transport == "stdio":
-        server.run("stdio")
-    else:
-        server.run("streamable-http", host=args.host, port=args.port)
+    try:
+        if args.transport == "stdio":
+            server.run("stdio")
+        else:
+            server.run("streamable-http", host=args.host, port=args.port)
+    finally:
+        if provider is not None:
+            provider.shutdown()
     return 0
 
 

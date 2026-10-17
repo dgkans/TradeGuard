@@ -24,6 +24,7 @@ ENV_VARS = [
     "DATABASE_URL",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_SERVICE_NAME",
+    "OTEL_SDK_DISABLED",
     "LLM_PROVIDER",
     "LLM_MODEL",
     "OLLAMA_BASE_URL",
@@ -139,3 +140,35 @@ def test_check_command_succeeds_with_defaults(tmp_path: Path) -> None:
     result = run_check(tmp_path, {})
     assert result.returncode == 0, result.stderr
     assert "replay" in result.stdout
+
+
+def test_otel_sdk_disabled_turns_tracing_off() -> None:
+    """Regression: an empty OTEL endpoint falls back to the default, so disabling needs
+    the explicit standard switch."""
+    from services.common.telemetry import setup_tracing
+
+    assert setup_tracing("t", load(OTEL_SDK_DISABLED="true")) is None
+    assert load(OTEL_EXPORTER_OTLP_ENDPOINT="").otel_exporter_otlp_endpoint != ""
+
+
+def test_child_env_forwards_tradeguard_settings_only() -> None:
+    """Regression: MCP stdio children only inherit a small env allowlist, so settings set
+    in the shell (DATABASE_URL, OTEL_*) were silently lost in the gateway and replay server."""
+    from services.common.config import child_env
+
+    env = child_env(
+        {
+            "DATABASE_URL": "postgresql://x@db/y",
+            "OTEL_SDK_DISABLED": "true",
+            "OTEL_RESOURCE_ATTRIBUTES": "a=b",
+            "LLM_MODEL": "qwen3:8b",
+            "AWS_SECRET_ACCESS_KEY": "nope",
+            "HOME": "/Users/x",
+        }
+    )
+    assert env == {
+        "DATABASE_URL": "postgresql://x@db/y",
+        "OTEL_SDK_DISABLED": "true",
+        "OTEL_RESOURCE_ATTRIBUTES": "a=b",
+        "LLM_MODEL": "qwen3:8b",
+    }

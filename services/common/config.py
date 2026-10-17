@@ -55,9 +55,10 @@ class Settings(BaseModel):
     )
 
     otel_exporter_otlp_endpoint: str = Field(
-        default="http://localhost:4317", alias="OTEL_EXPORTER_OTLP_ENDPOINT"
+        default="http://localhost:4318", alias="OTEL_EXPORTER_OTLP_ENDPOINT"
     )
     otel_service_name: str = Field(default="tradeguard", alias="OTEL_SERVICE_NAME")
+    otel_sdk_disabled: bool = Field(default=False, alias="OTEL_SDK_DISABLED")
 
     llm_provider: Literal["ollama", "groq", "gemini"] = Field(
         default="ollama", alias="LLM_PROVIDER"
@@ -88,6 +89,25 @@ class Settings(BaseModel):
         if isinstance(value, str):
             return value.upper()
         return value
+
+
+def child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Environment to pass to TradeGuard child processes (gateway, replay server).
+
+    MCP stdio clients start children with only a minimal allowlist (PATH, HOME, ...), so
+    settings exported in the shell would be lost. Forward every variable Settings knows
+    about plus OTEL_*, and nothing else, so unrelated secrets stay out of children.
+    """
+    source = os.environ if environ is None else environ
+    known = set()
+    for field in Settings.model_fields.values():
+        if field.alias:
+            known.add(field.alias)
+    forwarded = {}
+    for key, value in source.items():
+        if key in known or key.startswith("OTEL_"):
+            forwarded[key] = value
+    return forwarded
 
 
 def check_live_trading(raw: Mapping[str, str]) -> None:

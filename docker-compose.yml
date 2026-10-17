@@ -18,7 +18,7 @@ services:
       retries: 10
 
   jaeger:
-    image: jaegertracing/jaeger:2.10.0
+    image: jaegertracing/jaeger:2.21.0
     ports:
       - "16686:16686" # UI
     healthcheck:

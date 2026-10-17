@@ -17,6 +17,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
+from opentelemetry import trace
 
 from services.agent.prompts import PLAN_PROMPT, SYSTEM_PROMPT, UNDERSTAND_PROMPT, load_prompt
 
@@ -27,6 +28,7 @@ LIMIT_MESSAGE = (
     "Please narrow the request and try again."
 )
 THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
+tracer = trace.get_tracer("tradeguard.agent")
 
 
 @dataclass(frozen=True)
@@ -157,7 +159,11 @@ async def run_turn(
         # Each tool round is two steps (act, tools); allow headroom beyond the call cap.
         "recursion_limit": 2 * max_tool_calls + 10,
     }
-    state = await graph.ainvoke({"messages": [HumanMessage(text)]}, config=config)
+    with tracer.start_as_current_span(
+        "agent.turn", attributes={"tradeguard.session_id": thread_id}
+    ) as span:
+        state = await graph.ainvoke({"messages": [HumanMessage(text)]}, config=config)
+        span.set_attribute("tradeguard.request_type", state["request_type"])
     return {
         "answer": clean(text_of(state["messages"][-1])),
         "request_type": state["request_type"],

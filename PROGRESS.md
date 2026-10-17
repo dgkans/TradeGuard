@@ -6,7 +6,7 @@
 | F1 Replay server | done | 2026-10-16 |
 | F2 Pattern detectors | done | 2026-10-16 |
 | F3 Baseline agent | done | 2026-10-16 |
-| F4 Gateway proxy | not started | |
+| F4 Gateway proxy | done | 2026-10-16 |
 | F5 Policy engine | not started | |
 | F6 Approval flow | not started | |
 | F7 Taint tracking | not started | |
@@ -95,7 +95,7 @@
 - Gaps: thresholds are fixed, not tuned; levels use daily bars only; the bull flag is daily only, no intraday flags.
 - Next: F3 Baseline LangGraph agent (no guard).
 
-## Current feature: F3 Baseline LangGraph agent (no guard)
+## F3 Baseline LangGraph agent (no guard)
 ### Plan
 - LLM: Ollama on the Mac (user choice 2026-10-16), model `qwen3:8b`, temperature 0, thinking off. `services/agent/llm.py` builds the chat model from `Settings`; groq/gemini give a clear "not wired yet" error until F12.
 - `services/agent/tools.py`: our own MCP-to-LangChain binding on the MCP SDK 2.x `Client` (`langchain-mcp-adapters` needs `mcp<2`). It hides dev only tools (`advance_clock`) from the model, and logs every call with arguments, result, error and latency to `runs/<thread>.jsonl`.
@@ -120,3 +120,30 @@
 - Evals: none (harness is F9).
 - Gaps: replay account resets per process; groq/gemini not wired; baseline missed a failed breakout once in manual testing (D007).
 - Next: F4 Gateway proxy (pass through).
+
+## Current feature: F4 Gateway proxy (pass through)
+### Plan
+- `services/gateway/mcp_proxy/`: the gateway is a low-level MCP SDK `Server` (upstream tool schemas pass through unchanged) and an MCP `Client` to each upstream. It lists the union of upstream tools and refuses to start on a name collision (fail closed).
+- Every call: write an `audit_events` row with decision ALLOW (pass through) *before* forwarding. If that write fails, deny and don't forward. After the upstream returns, update the row with latency, overhead, error flag and a result summary.
+- `audit_events` table via Alembic migration: session, upstream, tool, args (jsonb), decision, rule_id, reason, timings, is_error, result_summary, trace and span ids.
+- Telemetry: `services/common/telemetry.py` sets up an OTLP/HTTP exporter. The MCP SDK already propagates `traceparent` through request `_meta`. Add spans `agent.turn`, `gateway.decision` (attributes `tradeguard.decision`, tool, session) and `gateway.upstream_call`.
+- Process layout: CLI -> stdio -> gateway -> stdio -> replay server. `tradeguard chat --direct` keeps the F3 no guard path for evals.
+- Overhead: `overhead_ms` = gateway time minus upstream time, per call. p50 and p95 from `audit_events` via `tradeguard gateway-stats`, plus a client side benchmark (direct vs through gateway) recorded in RESULTS.md.
+- Local Jaeger 2.21.0 binary (no Docker), `make jaeger` runs it.
+- Tests: identical results direct vs gateway (same seeds, same order ids), audit row per call, fail closed on audit failure, collision refusal, trace nesting (in-memory exporter), Postgres audit integration.
+### Acceptance
+- [x] Agent behaves identically through the gateway (same scenario, same orders): tested with a scripted agent and a 12 call script, direct vs gateway, identical results and order ids. With qwen3:8b the F3 demo produced the same 5 tool calls and the same order id `ord_1c80a3b1799d`.
+- [x] Every tool call appears in `audit_events` (tested in memory and against Postgres; 5 of 5 rows for the qwen3 demo session `f4-demo`)
+- [x] Traces visible in Jaeger with gateway spans nested under agent spans (tested with an in-memory exporter; verified through the Jaeger API: one trace, 36 spans, 3 services, single root `agent.turn`)
+- [x] Gateway overhead measured and logged (p50 and p95 per call): `audit_events.overhead_ms`, gateway exit log, `tradeguard gateway-stats`, and `make bench-gateway` (RESULTS.md)
+### Notes and open questions
+- Jaeger installed as an official release binary in `.tools/jaeger` (sha256 verified), because there's no Homebrew formula and no Docker.
+- Two bugs found while benchmarking, both with regression tests: an empty OTEL endpoint fell back to the default instead of disabling tracing (added `OTEL_SDK_DISABLED`); MCP stdio children didn't inherit shell settings such as `DATABASE_URL` (added `child_env()`). The first benchmark runs were discarded because of the first bug.
+- F5 must deny `advance_clock` to the agent (D008).
+- The 5 call qwen3 demo session showed a higher internal overhead p95 (23 ms, one cold call, tracing on) than the benchmark. Not comparable, and not used as a metric.
+### Loop summary
+- Built: MCP gateway (low-level SDK server + per-upstream clients) with fail closed pre-forward audit, `audit_events` Alembic migration, Postgres and in-memory audit sinks, OpenTelemetry tracing for agent, gateway and replay, `child_env`, `tradeguard chat` via gateway (`--direct` for no guard), `tradeguard gateway-stats`, `make bench-gateway`, local Jaeger.
+- Tests: 106 passing (14 new for F4); ruff and mypy strict clean.
+- Numbers (RESULTS.md, 3 benchmark runs of 300 calls): client side added latency p50 0.96 to 1.13 ms, p95 1.04 to 1.15 ms; gateway internal overhead p50 0.24 to 0.25 ms, p95 0.28 to 0.33 ms. Local only, tracing off.
+- Gaps: `advance_clock` still reachable through the gateway (F5 allowlist); replay account still resets per process; overhead not measured with tracing on or against a remote DB.
+- Next: F5 Policy engine.
