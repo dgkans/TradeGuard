@@ -172,3 +172,44 @@ Consequences:
   CLI's `/advance` goes through the same gateway. Only the agent side toolset hides it. F5's
   tool allowlist must deny it to the agent; operator calls need their own channel or marker.
 - `audit_events.decision` already allows ESCALATE for F6.
+
+## D009: Policy engine (F5)
+Date: 2026-10-16
+Context: F5 adds deterministic YAML rules, the `rules_only` baseline.
+Decision:
+- **Pipeline order** (PLAN.md Section 2): (1) JSON schema check of the args against the
+  upstream tool's own input schema (`jsonschema`, Draft 2020-12; a tool with no known schema
+  is denied), (2) tool allowlist, (3) policy rules, (6) approval rules. The first DENY
+  wins, then the first ESCALATE, else ALLOW `policy_pass`. Any exception is a DENY
+  `pipeline_error`. Rules apply to `place_order`; other allowlisted tools pass after
+  stages 1 and 2.
+- **Rule order:** static rules first (order shape, symbol, order type), then the
+  gateway fetches context, then context rules (market hours, orders per day, no short,
+  order size, position size, exposure), then approval rules. Static first means an
+  order for an unknown symbol never triggers a quote lookup.
+- **Boundaries** are inclusive: exactly at a limit is allowed. Order notional uses the
+  limit price for limit orders and the current quote for market orders; dollar sells are
+  converted to shares at the quote.
+- **Context** comes from the upstream's own read tools (`get_quote`, `get_positions`,
+  `get_account`, `get_clock`, `list_orders`), fetched concurrently and not audited as
+  agent calls. "Orders today" counts non-rejected orders submitted on the current sim
+  trading day (New York date). The field mapping assumes the replay server's response
+  shapes; F11 needs an adapter for Alpaca.
+- **ESCALATE** is not forwarded in F5. The agent gets a structured refusal with a note to
+  tell the user it awaits approval. F6 will park it in the approval queue instead.
+- **Operator channel:** tools in `operator_tools` (`advance_clock`) are allowed only with
+  the session's operator token in request `_meta` under `tradeguard/operator_token`. The
+  CLI makes a random token per session and passes it to the gateway in
+  `TRADEGUARD_OPERATOR_TOKEN`. The model only picks tool names and arguments, so it can't
+  send the token. The token doesn't bypass the policy for any other tool (tested).
+- Policy files reject unknown fields, and validation errors name the dotted field path.
+Alternatives considered: OPA/Rego (powerful but another runtime and language for a small
+fixed rule set); putting limits in the system prompt (the thing TradeGuard exists to
+avoid); auditing context reads (would triple audit volume and mix agent and gateway
+calls in the same table).
+Consequences:
+- Each order call costs five extra upstream reads before the decision. Their latency
+  counts in the gateway's overhead for writes.
+- Observed with qwen3:8b (manual runs, not an eval metric): "Buy $3000 of TSLA" was
+  denied by `max_order_notional` and the agent explained the $2000 limit; "Buy $1500 of
+  NVDA" was escalated by `approval_notional` and the agent said it awaits approval.

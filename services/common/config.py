@@ -19,6 +19,8 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 ALPACA_PAPER_HOST = "paper-api.alpaca.markets"
+# Name of the env var carrying the gateway operator token (services/gateway).
+OPERATOR_TOKEN_ENV = "TRADEGUARD_OPERATOR_TOKEN"  # noqa: S105 - a variable name
 
 # Anything outside these sets is treated as "on" / "not paper". Unknown spellings are
 # refused rather than guessed, so a typo can never enable live trading.
@@ -105,7 +107,7 @@ def child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
             known.add(field.alias)
     forwarded = {}
     for key, value in source.items():
-        if key in known or key.startswith("OTEL_"):
+        if key in known or key.startswith("OTEL_") or key == OPERATOR_TOKEN_ENV:
             forwarded[key] = value
     return forwarded
 

@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.16",
+    "jsonschema>=4.25",
     "langchain-core>=1.6",
     "langchain-ollama>=1.1",
     "langgraph>=1.2",
@@ -30,6 +31,7 @@ dev = [
     "pytest>=8.4",
     "pytest-asyncio>=1.1",
     "ruff>=0.12",
+    "types-jsonschema>=4.26.0.20261006",
     "types-pyyaml>=6.0.12.20260906",
 ]
 

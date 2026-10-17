@@ -13,6 +13,7 @@ In chat, `/advance N` moves the simulated clock N minutes (the agent itself cann
 import argparse
 import asyncio
 import json
+import secrets
 import sys
 import uuid
 from pathlib import Path
@@ -27,7 +28,7 @@ from services.agent.llm import make_chat_model
 from services.agent.tools import McpToolset, ToolCallLog
 from services.common.config import ConfigError, Settings, child_env, load_settings
 from services.common.telemetry import setup_tracing
-from services.gateway.mcp_proxy.proxy import percentile
+from services.gateway.mcp_proxy.proxy import OPERATOR_META_KEY, OPERATOR_TOKEN_ENV, percentile
 from services.replay_server.scenario import ScenarioError, load_scenario
 
 RUNS_DIR = Path("runs")
@@ -44,14 +45,17 @@ async def chat(args: argparse.Namespace, settings: Settings) -> int:
     session_id = args.session or f"{scenario.id}-{uuid.uuid4().hex[:8]}"
     log = ToolCallLog(path=RUNS_DIR / f"{session_id}.jsonl", thread_id=session_id,
                       echo=echo_tool_call)  # fmt: skip
+    operator_token = secrets.token_urlsafe(24)
     if args.direct:
         server_args = ["-m", "services.replay_server", "--scenario", args.scenario, "--dev-tools"]
     else:
-        server_args = ["-m", "services.gateway", "--session", session_id,
-                       "--scenario", args.scenario, "--dev-tools"]  # fmt: skip
+        server_args = ["-m", "services.gateway", "--session", session_id, "--scenario",
+                       args.scenario, "--dev-tools", "--policy", args.policy]  # fmt: skip
+    env = child_env() | {OPERATOR_TOKEN_ENV: operator_token}
     server = StdioServerParameters(
-        command=sys.executable, args=server_args, cwd=Path.cwd(), env=child_env()
+        command=sys.executable, args=server_args, cwd=Path.cwd(), env=env
     )
+    operator_meta = {OPERATOR_META_KEY: operator_token}
     context = AgentContext(scenario_id=scenario.id, watchlist=scenario.watchlist)
     chat_model = make_chat_model(settings)
     json_model = make_chat_model(settings, json_mode=True)
@@ -62,14 +66,14 @@ async def chat(args: argparse.Namespace, settings: Settings) -> int:
         async with McpToolset(server, log=log) as toolset:
             graph = build_graph(chat_model, json_model, toolset.tools, context=context,
                                 checkpointer=saver, max_tool_calls=args.max_tool_calls)  # fmt: skip
-            route = "direct (no guard)" if args.direct else "via gateway"
+            route = "direct (no guard)" if args.direct else f"via gateway, policy {args.policy}"
             model = f"{settings.llm_provider}:{settings.llm_model}"
             print(f"session {session_id} | scenario {scenario.id} | model {model} | {route} "
                   "| paper/replay only")  # fmt: skip
             print(f"tool log: {log.path}")
             if args.once:
                 return await one_turn(graph, args.once, session_id)
-            return await repl(graph, toolset, session_id)
+            return await repl(graph, toolset, session_id, operator_meta)
 
 
 async def one_turn(graph: Any, text: str, session_id: str) -> int:
@@ -80,7 +84,9 @@ async def one_turn(graph: Any, text: str, session_id: str) -> int:
     return 0
 
 
-async def repl(graph: Any, toolset: McpToolset, session_id: str) -> int:
+async def repl(
+    graph: Any, toolset: McpToolset, session_id: str, operator_meta: dict[str, Any]
+) -> int:
     print("Type a message. /advance N moves the clock, /clock shows it, /quit exits.")
     while True:
         try:
@@ -93,12 +99,12 @@ async def repl(graph: Any, toolset: McpToolset, session_id: str) -> int:
         if text in ("/quit", "/exit"):
             return 0
         if text == "/clock":
-            print(await toolset.call("get_clock", {}))
+            print(await toolset.call("get_clock", {}, operator_meta))
             continue
         if text.startswith("/advance"):
             parts = text.split()
             minutes = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
-            print(await toolset.call("advance_clock", {"minutes": minutes}))
+            print(await toolset.call("advance_clock", {"minutes": minutes}, operator_meta))
             continue
         result = await run_turn(graph, text, thread_id=session_id)
         print(f"[understand: {result['request_type']} | {result['summary']}]")
@@ -144,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     chat_cmd.add_argument(
         "--direct", action="store_true", help="skip the gateway (no_guard baseline)"
     )
+    chat_cmd.add_argument("--policy", default="policies/default.yaml", help="gateway policy")
     stats_cmd = commands.add_parser("gateway-stats", help="gateway overhead for a session")
     stats_cmd.add_argument("--session", required=True)
     args = parser.parse_args(argv)

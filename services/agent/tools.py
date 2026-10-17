@@ -105,17 +105,22 @@ class McpToolset:
         await self._stack.aclose()
         self._client = None
 
-    async def call(self, name: str, args: dict[str, Any]) -> Any:
-        """Call a tool without logging it as an agent call. Raises RuntimeError on tool error."""
-        result, error = await self._raw_call(name, args)
+    async def call(
+        self, name: str, args: dict[str, Any], meta: dict[str, Any] | None = None
+    ) -> Any:
+        """Operator call, not logged as an agent call. `meta` goes into the request `_meta`
+        (for example the gateway operator token). Raises RuntimeError on tool error."""
+        result, error = await self._raw_call(name, args, meta)
         if error is not None:
             raise RuntimeError(error)
         return result
 
-    async def _raw_call(self, name: str, args: dict[str, Any]) -> tuple[Any, str | None]:
+    async def _raw_call(
+        self, name: str, args: dict[str, Any], meta: dict[str, Any] | None = None
+    ) -> tuple[Any, str | None]:
         if self._client is None:
             raise RuntimeError("toolset is not connected")
-        response = await self._client.call_tool(name, args)
+        response = await self._client.call_tool(name, args, meta=meta)  # type: ignore[arg-type]
         text_parts = []
         for block in response.content:
             text = getattr(block, "text", None)

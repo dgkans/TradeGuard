@@ -100,3 +100,28 @@ make bench-gateway                                # direct vs gateway latency, J
 
 Traces show `agent.turn > agent.tool_call > gateway.decision > gateway.upstream_call > replay
 tools/call` across the three processes. Measured overhead is in [RESULTS.md](RESULTS.md).
+
+## Policy engine (F5)
+
+The gateway now decides every call with the policy in `policies/default.yaml` (or
+`--policy policies/strict.yaml`):
+
+1. **Schema check**: arguments must match the upstream tool's input schema.
+2. **Tool allowlist**: read and write tools. `advance_clock` is operator only.
+3. **Policy rules** for orders: allowed symbols and order types, max order size, no
+   shorting, max position size, max portfolio exposure, max orders per day, market hours.
+4. **Approval rules**: orders over $1000, or selling more than 50% of a position,
+   return ESCALATE (the human approval queue arrives in F6).
+
+DENY and ESCALATE are never forwarded. The agent gets a structured refusal (`decision`,
+`rule_id`, `reason`, `policy`, `executed: false`), and every decision is in
+`audit_events` with its rule id and reason.
+
+```bash
+uv run tradeguard chat --scenario demo --once "Buy \$3000 of TSLA"   # DENY max_order_notional
+uv run tradeguard chat --scenario demo --once "Buy \$1500 of NVDA"   # ESCALATE approval_notional
+```
+
+Policy files reject unknown fields, and errors name the field, for example
+`require_approval.notional_over_usd: Input should be a valid number`. Design notes are in
+[DECISIONS.md](DECISIONS.md) D009.

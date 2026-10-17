@@ -172,3 +172,9 @@ def test_child_env_forwards_tradeguard_settings_only() -> None:
         "OTEL_RESOURCE_ATTRIBUTES": "a=b",
         "LLM_MODEL": "qwen3:8b",
     }
+
+
+def test_child_env_forwards_operator_token() -> None:
+    from services.common.config import OPERATOR_TOKEN_ENV, child_env
+
+    assert child_env({OPERATOR_TOKEN_ENV: "t"}) == {OPERATOR_TOKEN_ENV: "t"}

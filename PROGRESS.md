@@ -7,7 +7,7 @@
 | F2 Pattern detectors | done | 2026-10-16 |
 | F3 Baseline agent | done | 2026-10-16 |
 | F4 Gateway proxy | done | 2026-10-16 |
-| F5 Policy engine | not started | |
+| F5 Policy engine | done | 2026-10-16 |
 | F6 Approval flow | not started | |
 | F7 Taint tracking | not started | |
 | F8 Intent alignment | not started | |
@@ -121,7 +121,7 @@
 - Gaps: replay account resets per process; groq/gemini not wired; baseline missed a failed breakout once in manual testing (D007).
 - Next: F4 Gateway proxy (pass through).
 
-## Current feature: F4 Gateway proxy (pass through)
+## F4 Gateway proxy (pass through)
 ### Plan
 - `services/gateway/mcp_proxy/`: the gateway is a low-level MCP SDK `Server` (upstream tool schemas pass through unchanged) and an MCP `Client` to each upstream. It lists the union of upstream tools and refuses to start on a name collision (fail closed).
 - Every call: write an `audit_events` row with decision ALLOW (pass through) *before* forwarding. If that write fails, deny and don't forward. After the upstream returns, update the row with latency, overhead, error flag and a result summary.
@@ -147,3 +147,28 @@
 - Numbers (RESULTS.md, 3 benchmark runs of 300 calls): client side added latency p50 0.96 to 1.13 ms, p95 1.04 to 1.15 ms; gateway internal overhead p50 0.24 to 0.25 ms, p95 0.28 to 0.33 ms. Local only, tracing off.
 - Gaps: `advance_clock` still reachable through the gateway (F5 allowlist); replay account still resets per process; overhead not measured with tracing on or against a remote DB.
 - Next: F5 Policy engine.
+
+## Current feature: F5 Policy engine
+### Plan
+- `services/gateway/policy/model.py`: Pydantic `Policy` (fields from PLAN.md F5, `extra="forbid"` so typos fail), YAML loader whose errors name the field (`require_approval.notional_over_usd: ...`). `policies/default.yaml` and `policies/strict.yaml`.
+- `services/gateway/pipeline/`: stages in Section 2 order: (1) schema check against the upstream tool's JSON schema, (2) tool allowlist, (3) policy rules, (6) approval rules. First DENY wins, then the first ESCALATE, else ALLOW `policy_pass`. Any exception is a DENY `pipeline_error` (fail closed).
+- Rules are small classes, `evaluate(call, context) -> RuleResult(decision, reason, rule_id)`: order shape, symbol allowlist, order type, max order notional, no short, max position notional, max portfolio exposure, max orders per day, market hours; approval for notional over the threshold and for selling more than a set share of a position.
+- Context (price, holdings, equity, clock, orders today) is fetched by the gateway from the upstream's own read tools, only for write calls that pass the static rules. If that fetch fails: DENY `context_unavailable`.
+- DENY and ESCALATE return a structured refusal (decision, rule_id, reason, policy) and are never forwarded. F6 will turn ESCALATE into an approval queue.
+- Operator channel: `advance_clock` is not on the allowlist. The CLI's `/advance` sends a per session operator token in MCP `_meta` (the model can't set it); the gateway allows only `operator_tools` with it, audited as `rule_id=operator`.
+- Gateway and CLI take `--policy` (default `policies/default.yaml`); a missing or invalid policy refuses to start.
+### Acceptance
+- [x] Each rule has unit tests for allow, deny and boundary values (`tests/policy/test_rules.py`, 11 rules)
+- [x] Unknown symbols, oversize orders, shorts and after hours orders are denied (tested end to end in the gateway on the demo scenario)
+- [x] Orders over the approval threshold return ESCALATE (tested: `approval_notional` and `approval_sell_pct`; verified with qwen3:8b)
+- [x] Every decision in `audit_events` carries `rule_id` and reason (tested; Postgres check: 0 rows missing either)
+### Notes and open questions
+- One test setup mistake fixed: selling 8 of 10 NVDA is also over the $1000 approval threshold, so the sell percentage test now uses a 4 share position.
+- The ESCALATE path stops at a refusal for now; F6 adds the queue, approve, reject and timeout.
+- Smoke eval still waits on F9.
+### Loop summary
+- Built: policy model and loader (`policies/default.yaml`, `policies/strict.yaml`), 11 rule classes, pipeline (schema, allowlist, rules, approval; fail closed), gateway context fetcher, structured refusals, operator token channel for `advance_clock`, `--policy` on gateway and CLI.
+- Tests: 186 passing (80 new for F5); ruff and mypy strict clean.
+- Evals: none (harness is F9). Manual qwen3:8b runs matched the plan's demo: $3000 TSLA denied, $1500 NVDA escalated.
+- Gaps: ESCALATE not queued yet (F6); context mapping is specific to the replay server (F11 adapter); write call overhead with context fetch not yet benchmarked.
+- Next: F6 Human approval flow.
