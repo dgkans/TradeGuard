@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from mcp import Client
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -202,3 +203,23 @@ async def test_record_user_message_is_a_no_op_when_tracking_is_off() -> None:
     assert not result.is_error
     assert body(result) == {"recorded": False, "reason": "provenance tracking is off"}
     assert forged.is_error
+
+
+async def test_record_user_message_is_listed_even_when_tracking_is_off(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression: rules_only answered the tool without listing it, so the MCP client
+    re-listed tools and logged "not listed by server" on every report (300 times in F9)."""
+    from services.gateway.policy.model import IntentConfig, TaintConfig
+
+    rig = Rig()
+    policy = load_policy(REPO_ROOT / "policies/default.yaml").model_copy(
+        update={"taint": TaintConfig(enabled=False), "intent": IntentConfig(enabled=False)}
+    )
+    gateway = Gateway([Upstream("replay", build_server(rig.session))], audit=rig.audit,
+                      session_id="off", policy=policy, operator_token=TOKEN)  # fmt: skip
+    async with gateway, Client(gateway.server) as client:
+        names = {tool.name for tool in (await client.list_tools()).tools}
+        await client.call_tool("record_user_message", {"text": "hi"}, meta=OPERATOR)
+    assert "record_user_message" in names
+    assert "not listed by server" not in caplog.text

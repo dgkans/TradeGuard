@@ -11,3 +11,5 @@ dist/
 runs/
 .tools/
 evals/reports/run_*/tapes/
+evals/reports/full_*/tapes/
+evals/reports/full_*_replay/

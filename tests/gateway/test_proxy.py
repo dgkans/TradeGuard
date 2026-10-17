@@ -64,7 +64,8 @@ async def test_lists_union_of_upstream_tools() -> None:
         expected = {tool.name for tool in (await direct.list_tools()).tools}
     async with gateway_for(session, MemoryAuditSink()) as gateway, Client(gateway.server) as c:
         listed = (await c.list_tools()).tools
-    assert {tool.name for tool in listed} == expected
+    # Plus the gateway's own operator tool (no approval store here, so no resolve_approval).
+    assert {tool.name for tool in listed} == expected | {"record_user_message"}
     schemas = {tool.name: tool.input_schema for tool in listed}
     assert "notional" in schemas["place_order"]["properties"]
 

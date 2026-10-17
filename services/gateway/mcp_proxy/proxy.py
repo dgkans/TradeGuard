@@ -171,8 +171,8 @@ class Gateway:
         tools = list(self.tools)
         if self.approvals is not None:
             tools.append(RESOLVE_TOOL_SPEC)
-        if self.provenance is not None:
-            tools.append(RECORD_USER_TOOL_SPEC)
+        # Always listed: with tracking off it is a no-op, but still answered for the operator.
+        tools.append(RECORD_USER_TOOL_SPEC)
         return types.ListToolsResult(tools=tools)
 
     async def _call_tool(

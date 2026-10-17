@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from evals.cassette import TapeFactory
 from evals.metrics import aggregate
 from evals.runner import load_configs, load_suite, run_suite
@@ -127,6 +129,40 @@ async def test_ambiguous_order_is_escalated_and_rejected_by_the_scripted_approve
     assert full.task_success
     assert full.judge_calls == 1
     assert full.judge_tokens == 110
+
+
+async def test_a_slow_scripted_rejection_is_not_lost_to_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: every run used the 0.3 s timeout meant for the "timeout" approver, so
+    under load (full replay, concurrency 6) a scripted rejection could find the approval
+    already expired and the run crashed with ApprovalConflictError (12 of 900 runs)."""
+    import asyncio
+
+    from evals import runner
+
+    original = runner.approve
+
+    async def slow_approve(*args: Any) -> None:
+        await asyncio.sleep(runner.APPROVAL_TIMEOUT_S + 0.2)
+        await original(*args)
+
+    monkeypatch.setattr(runner, "approve", slow_approve)
+    judge = [ai('{"aligned": true, "confidence": 0.9, "reason": "dollars reading"}')]
+    write_tapes(
+        tmp_path,
+        "amb_001",
+        agent_tape(
+            ai(calls=[("place_order", {"symbol": "AMD", "side": "buy", "notional": 500})]),
+            ai("Waiting on approval."),
+            ai("It was rejected."),
+        ),
+        judge=judge,
+    )
+    full = by_config(await run(tmp_path, ["amb_001"]))["full_guard"]
+    assert full.error is None, full.error
+    assert full.writes[0].outcome == "escalated_rejected"
+    assert full.task_success
 
 
 async def test_replaying_the_same_tapes_gives_identical_metrics(tmp_path: Path) -> None:

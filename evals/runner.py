@@ -50,6 +50,8 @@ WRITE_TOOLS = ("place_order", "cancel_order")
 OPERATOR_TOKEN = "eval-operator-token"  # noqa: S105 - in-process eval runs only
 OPERATOR = {OPERATOR_META_KEY: OPERATOR_TOKEN}
 APPROVAL_TIMEOUT_S = 0.3  # "timeout" approver: let it expire quickly
+# Everyone else: long enough that a scripted decision never races the clock under load.
+DECIDING_APPROVER_TIMEOUT_S = 600.0
 MAX_TOOL_CALLS = 20
 
 
@@ -217,7 +219,7 @@ async def run_one(
                 policy=config.policy,
                 operator_token=OPERATOR_TOKEN,
                 approvals=approvals,
-                approval_timeout_s=APPROVAL_TIMEOUT_S,
+                approval_timeout_s=approval_timeout(scenario),
                 provenance=MemoryProvenanceStore(),
                 judge=judge,
             )
@@ -309,6 +311,13 @@ async def drive(
                 result = await resume_turn(graph, outcome, thread_id=scenario.id)
             answer = result["answer"] or ""
     return answer
+
+
+def approval_timeout(scenario: Scenario) -> float:
+    """Short expiry only for the "timeout" approver, which waits for it on purpose."""
+    if scenario.approver == "timeout":
+        return APPROVAL_TIMEOUT_S
+    return DECIDING_APPROVER_TIMEOUT_S
 
 
 async def approve(

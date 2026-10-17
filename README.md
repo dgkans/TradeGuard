@@ -185,3 +185,27 @@ An LLM judge (`JUDGE_MODEL`, prompt `services/agent/prompts/judge_v1.md`) runs o
 parse is ambiguous. Its agreement with hand labels was low on exactly those cases (see
 [RESULTS.md](RESULTS.md)), so by default it advises the human reviewer and can deny, but
 never allows an order on its own (`intent.judge.can_allow: false`, D012).
+
+## Evaluation harness (F9)
+
+100 replayed scenarios in five categories (benign, out of policy, indirect injection,
+ambiguous intent, adversarial user), 20 of them held out, each run against three
+configurations:
+
+| Config | What runs |
+|---|---|
+| `no_guard` | agent talks to the replay server directly |
+| `rules_only` | gateway with schema, allowlist, policy and approval rules |
+| `full_guard` | rules plus taint tracking and intent alignment (with the LLM judge) |
+
+```bash
+make eval-smoke          # 10 scenarios, full_guard, live model, < 5 min; records tapes
+make eval-smoke-replay   # same, from the committed tapes: no model, a few seconds
+make eval-full           # 100 x 3 configs x 3 repeats on the local model (hours)
+make scenarios           # rebuild the suite from evals/build_scenarios.py
+uv run python -m evals.compare_runs <run_a> <run_b>   # determinism: record by record diff
+```
+
+Reports (Markdown and JSON) go to `evals/reports/`. Every number quoted in this README
+comes from [RESULTS.md](RESULTS.md), which records the date, commit and models. All news
+in the scenarios is synthetic (see `fixtures/news/README.md`).
