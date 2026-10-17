@@ -42,7 +42,16 @@ make replay SCENARIO=path/to/scenario.yaml
 ```
 
 Tools: `get_clock`, `get_bars`, `get_quote`, `get_news`, `get_account`, `get_positions`,
-`place_order`, `cancel_order`, `list_orders` (and `advance_clock` with `--dev-tools`).
+`place_order`, `cancel_order`, `list_orders`, `detect_patterns`, `scan_watchlist` (and
+`advance_clock` with `--dev-tools`).
 Fill and timing rules are in [DECISIONS.md](DECISIONS.md) D005. Bar data comes from Yahoo
 Finance and is committed under `fixtures/bars/` (D004). All news under `fixtures/news/` is
 synthetic and labeled as such.
+
+## Price action detectors (F2)
+
+`detect_patterns(symbol)` and `scan_watchlist(symbols)` run read only detectors on bars
+closed so far: prior day high break, inside bar, simplified bull flag, ATR(14), and
+support and resistance. Every fired pattern says which rule fired, the numbers behind it,
+and the timestamps of the bars that support it. Rules are in
+[services/patterns/README.md](services/patterns/README.md).

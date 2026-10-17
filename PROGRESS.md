@@ -4,7 +4,7 @@
 |---|---|---|
 | F0 Skeleton | done (compose + CI checks deferred to first push) | 2026-10-16 |
 | F1 Replay server | done | 2026-10-16 |
-| F2 Pattern detectors | not started | |
+| F2 Pattern detectors | done | 2026-10-16 |
 | F3 Baseline agent | not started | |
 | F4 Gateway proxy | not started | |
 | F5 Policy engine | not started | |
@@ -44,7 +44,7 @@
 - Gaps: compose stack not started (no Docker on dev Mac); CI not yet run (not pushed). Deferred to the first push (user decision).
 - Next: F1 Replay MCP server.
 
-## Current feature: F1 Replay MCP server
+## F1 Replay MCP server
 ### Plan
 - `download.py`: fetch 1d (2y) and 5m (60d, Yahoo's limit) bars for 20 symbols into `fixtures/bars/<interval>/<SYM>.parquet`; commit the files.
 - `bars.py`: bar store; every timestamp is the bar start in UTC; a bar is visible only after it closes.
@@ -69,3 +69,28 @@
 - Evals: none (smoke eval starts once the agent exists).
 - Gaps: no holiday calendar (D004); intraday scenarios limited to 2026-07-24..2026-10-16; F0 compose/CI checks still deferred to the first push.
 - Next: F2 Price action pattern detectors.
+
+## Current feature: F2 Price action pattern detectors
+### Plan
+- `services/patterns/` holds pure functions over any bar with `start, open, high, low, close, volume` (a Protocol, so it has no dependency on the replay server).
+- `atr(bars, n=14)`: Wilder ATR. `None` when there are too few bars.
+- `inside_bar(bars)`: last daily bar strictly inside the one before it.
+- `prior_day_high_break(prior_day, today_bars)`: first closed 5m bar today that *closes* above yesterday's high (a wick alone doesn't count).
+- `bull_flag(bars)`: simplified rules: pole of 3 to 7 bars gaining at least 8%, then a flag of 2 to 6 bars with no new high, a retrace of at most 50% of the pole, highs drifting flat or down, and lower average volume than the pole.
+- `support_resistance(bars)`: swing pivots (2 bars each side) clustered within 0.5 ATR, split around the last close, nearest first, with touch counts.
+- Every detection returns the rule id, a plain English rule, the numbers that satisfied it, and the supporting bars by role and timestamp.
+- Replay tools `detect_patterns(symbol)` and `scan_watchlist(symbols)` use only bars closed at the sim clock's "now".
+- Tests: hand built bar sequences, positive and negative cases, boundaries; tool tests check that no output timestamp is after now.
+### Acceptance
+- [x] Each detector has unit tests on hand built bar sequences, including negative cases
+- [x] Output explains which rule fired with bar timestamps
+- [x] Rules documented in `services/patterns/README.md`
+### Notes and open questions
+- Demo run showed NVDA's prior day high break had already failed by 10:30, with nothing saying so. Added `holding_above_high` and a `latest_bar` reference (regression test).
+- Sanity sweep (dev check, not an eval metric): 1,180 symbol-days, inside bar 126, prior day high break 449, bull flag 33 (D006).
+### Loop summary
+- Built: `services/patterns/` (ATR, inside bar, prior day high break, simplified bull flag, support/resistance, analyze/summarize) and replay tools `detect_patterns` and `scan_watchlist`.
+- Tests: 84 passing (29 new for F2); ruff and mypy strict clean.
+- Evals: none (the agent doesn't exist yet).
+- Gaps: thresholds are fixed, not tuned; levels use daily bars only; the bull flag is daily only, no intraday flags.
+- Next: F3 Baseline LangGraph agent (no guard).

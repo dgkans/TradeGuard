@@ -72,3 +72,26 @@ Decision:
 Alternatives considered: filling at the bar close (looks ahead within the bar); letting
 the broker allow shorts (would add margin modeling; F5 policy denies shorts anyway).
 Consequences: the F5 policy `tool_allowlist.read` must add `get_clock`.
+
+## D006: Pattern detector design
+Date: 2026-10-16
+Context: F2 needs explainable, read only price action detectors (rules in
+`services/patterns/README.md`).
+Decision:
+- Detectors are pure functions over an `OHLCV` Protocol, with no dependency on the replay
+  server, so F11 can run them on Alpaca bars unchanged.
+- The prior day high break is close based (a wick doesn't count) and reports
+  `holding_above_high`. Without it, a break that has already failed looks the same as a
+  live one. This was found on the demo data: NVDA broke and fell back on 2026-09-15.
+- The bull flag uses fixed thresholds (pole >= 8% in 3 to 7 bars, flag 2 to 6 bars,
+  retrace <= 50%, lower volume) instead of fitted ones, so behaviour is predictable and
+  testable. Breakout strength is `latest_vs_high_atr`, which is comparable across
+  symbols, rather than a made up composite score.
+- `scan_watchlist` sorts by number of fired patterns, then symbol. It does not pick a
+  "best" trade; the agent and user decide.
+Alternatives considered: TA-Lib or pandas-ta (opaque rules, binary install, harder to
+explain bar by bar); fitting thresholds to the fixture data (overfits to 60 sessions).
+Consequences: sanity sweep on the committed data at 11:00 ET, all 20 symbols × 59
+sessions (1,180 symbol-days): inside bar fired 126 times, prior day high break 449, bull
+flag 33. So every detector fires on real data. This is a development check, not an eval
+metric.

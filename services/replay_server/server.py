@@ -60,6 +60,19 @@ def build_server(session: ReplaySession, *, dev_tools: bool = False) -> MCPServe
         """Open positions with quantity, average entry price and unrealized P&L."""
         return run(session.get_positions)
 
+    @server.tool(annotations=READ_ONLY)
+    async def detect_patterns(symbol: str) -> dict[str, Any]:
+        """Price action analysis on bars closed so far: prior day high break, inside bar,
+        bull flag, daily ATR(14), support and resistance. Each fired pattern includes the
+        rule that fired, the numbers behind it and the supporting bars' timestamps."""
+        return run(session.detect_patterns, symbol)
+
+    @server.tool(annotations=READ_ONLY)
+    async def scan_watchlist(symbols: list[str]) -> dict[str, Any]:
+        """detect_patterns for up to 25 symbols in compact form, most fired patterns first.
+        For prior day high breaks, details.latest_vs_high_atr measures breakout strength."""
+        return run(session.scan_watchlist, symbols)
+
     @server.tool(annotations=WRITE)
     async def place_order(
         symbol: str,

@@ -10,7 +10,15 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from services.replay_server.bars import INTERVALS, Bar, BarStore, bar_start, is_market_open
+from services.patterns.analyze import analyze, summarize
+from services.replay_server.bars import (
+    INTERVALS,
+    MARKET_TZ,
+    Bar,
+    BarStore,
+    bar_start,
+    is_market_open,
+)
 from services.replay_server.broker import OrderType, Position, Side, SimBroker, to_decimal
 from services.replay_server.news import NewsItem, load_news
 from services.replay_server.scenario import Scenario
@@ -18,6 +26,8 @@ from services.replay_server.scenario import Scenario
 MAX_BARS = 500
 MAX_NEWS = 100
 MAX_ADVANCE_MINUTES = 60 * 24 * 7
+MAX_SCAN_SYMBOLS = 25
+PATTERN_LOOKBACK_DAYS = 120
 
 
 class ToolInputError(ValueError):
@@ -108,6 +118,40 @@ class ReplaySession:
         for item in visible[:limit]:
             rows.append(item.public_view())
         return {"as_of": self.now.isoformat(), "items": rows}
+
+    # --- patterns -------------------------------------------------------------------
+
+    def detect_patterns(self, symbol: str) -> dict[str, Any]:
+        """Run every price action detector on bars closed by now (see services/patterns)."""
+        symbol = self._symbol(symbol)
+        daily = _closed_bars(self.store.all_bars(symbol, "1d"), self.now)[-PATTERN_LOOKBACK_DAYS:]
+        today = self.now.astimezone(MARKET_TZ).date()
+        prior_day = None
+        for bar in reversed(daily):
+            if bar.start.astimezone(MARKET_TZ).date() < today:
+                prior_day = bar
+                break
+        intraday = []
+        for bar in _closed_bars(self.store.all_bars(symbol, "5m"), self.now):
+            if bar.start.astimezone(MARKET_TZ).date() == today:
+                intraday.append(bar)
+        result = analyze(symbol, daily, prior_day, intraday)
+        result["as_of"] = self.now.isoformat()
+        return result
+
+    def scan_watchlist(self, symbols: list[str]) -> dict[str, Any]:
+        """detect_patterns for several symbols, compacted. Symbols with the most fired
+        patterns come first. A bad symbol gets an error entry instead of failing the scan."""
+        if not symbols or len(symbols) > MAX_SCAN_SYMBOLS:
+            raise ToolInputError(f"give between 1 and {MAX_SCAN_SYMBOLS} symbols")
+        rows = []
+        for symbol in symbols:
+            try:
+                rows.append(summarize(self.detect_patterns(symbol)))
+            except ToolInputError as exc:
+                rows.append({"symbol": symbol.strip().upper(), "error": str(exc), "patterns": []})
+        rows.sort(key=_scan_rank)
+        return {"as_of": self.now.isoformat(), "results": rows}
 
     # --- account --------------------------------------------------------------------
 
@@ -288,6 +332,10 @@ def _positive(name: str, value: float | None) -> Decimal | None:
     if not number.is_finite() or number <= 0:
         raise ToolInputError(f"{name} must be greater than 0")
     return number
+
+
+def _scan_rank(row: dict[str, Any]) -> tuple[int, str]:
+    return (-len(row["patterns"]), row["symbol"])
 
 
 def _published(item: NewsItem) -> datetime:

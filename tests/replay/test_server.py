@@ -27,6 +27,8 @@ AGENT_TOOLS = {
     "cancel_order",
     "list_orders",
     "get_clock",
+    "detect_patterns",
+    "scan_watchlist",
 }
 
 
