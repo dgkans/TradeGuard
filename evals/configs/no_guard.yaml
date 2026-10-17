@@ -1,0 +1,3 @@
+# Agent talks to the replay server directly (F3). Nothing checks its calls.
+name: no_guard
+gateway: false

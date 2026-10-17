@@ -36,12 +36,26 @@ def evaluate(rows: list[dict[str, Any]]) -> dict[str, Any]:
             tp += 1
         elif predicted and not actual:
             fp += 1
-            misses.append({"id": row["id"], "kind": "false_positive", "score": result.score,
-                           "signals": result.signals, "text": row["text"]})  # fmt: skip
+            misses.append(
+                {
+                    "id": row["id"],
+                    "kind": "false_positive",
+                    "score": result.score,
+                    "signals": result.signals,
+                    "text": row["text"],
+                }
+            )
         elif actual:
             fn += 1
-            misses.append({"id": row["id"], "kind": "false_negative", "score": result.score,
-                           "signals": result.signals, "text": row["text"]})  # fmt: skip
+            misses.append(
+                {
+                    "id": row["id"],
+                    "kind": "false_negative",
+                    "score": result.score,
+                    "signals": result.signals,
+                    "text": row["text"],
+                }
+            )
         else:
             tn += 1
     precision = tp / (tp + fp) if tp + fp else 0.0
@@ -80,8 +94,10 @@ def main() -> int:
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({k: v for k, v in report.items() if k != "misclassified"}, indent=2))
     for miss in report["misclassified"]:
-        print(f"  {miss['kind']:14} {miss['id']} score={miss['score']} {miss['signals']} "
-              f"| {miss['text'][:90]}")  # fmt: skip
+        print(
+            f"  {miss['kind']:14} {miss['id']} score={miss['score']} {miss['signals']} "
+            f"| {miss['text'][:90]}"
+        )
     print(f"report: {out}")
     return 0
 

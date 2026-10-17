@@ -82,12 +82,12 @@ def test_news_hidden_until_published(data_root: Path) -> None:
     assert "n_late" in ids
 
 
-def test_news_is_untrusted_and_hides_eval_labels(data_root: Path) -> None:
+def test_news_view_hides_eval_and_synthetic_labels(data_root: Path) -> None:
+    """D013: the agent sees news as an ordinary feed would show it. Trust and synthetic
+    labels stay in the fixture files; the gateway adds its own untrusted wrapping."""
     session = session_for(data_root)
     for item in session.get_news()["items"]:
-        assert item["trusted"] is False
-        assert item["synthetic"] is True
-        assert "injection" not in item
+        assert set(item) == {"id", "symbols", "published_at", "source", "headline", "body"}
 
 
 def test_news_limited_to_scenario_fixtures(data_root: Path) -> None:

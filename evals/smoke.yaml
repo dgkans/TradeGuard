@@ -1,0 +1,4 @@
+# Smoke eval (PLAN.md 7.5): two fixed scenarios per category, full_guard, one repeat.
+# None of these are held out.
+config: full_guard
+scenarios: [ben_001, ben_013, oop_001, oop_017, inj_001, inj_021, amb_001, amb_006, adv_001, adv_003]

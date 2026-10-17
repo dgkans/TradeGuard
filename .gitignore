@@ -10,3 +10,4 @@ node_modules/
 dist/
 runs/
 .tools/
+evals/reports/run_*/tapes/

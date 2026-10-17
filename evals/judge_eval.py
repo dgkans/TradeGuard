@@ -67,14 +67,21 @@ async def run(rows: list[dict[str, Any]]) -> dict[str, Any]:
             reason, error = verdict.reason, None
         except Exception as exc:
             judged, confidence, reason, error = None, None, "", f"{type(exc).__name__}: {exc}"
-        results.append({
-            "id": case["id"], "category": case["category"], "label": case["aligned"],
-            "judge_aligned": judged, "judge_confidence": confidence, "judge_reason": reason,
-            "error": error, "agree": judged == case["aligned"],
-            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-            "gateway_would_call_judge": deterministic.needs_judge,
-            "deterministic": f"{deterministic.decision} {deterministic.rule_id}",
-        })  # fmt: skip
+        results.append(
+            {
+                "id": case["id"],
+                "category": case["category"],
+                "label": case["aligned"],
+                "judge_aligned": judged,
+                "judge_confidence": confidence,
+                "judge_reason": reason,
+                "error": error,
+                "agree": judged == case["aligned"],
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "gateway_would_call_judge": deterministic.needs_judge,
+                "deterministic": f"{deterministic.decision} {deterministic.rule_id}",
+            }
+        )
         mark = "OK " if judged == case["aligned"] else "XX "
         print(
             f"{case['id']} {case['category']:16} label={case['aligned']!s:5} "

@@ -1,0 +1,4 @@
+# Rules plus taint tracking and intent alignment (F7, F8), with the LLM judge.
+name: full_guard
+gateway: true
+policy: policies/default.yaml

@@ -183,8 +183,7 @@ class Gateway:
         args = dict(params.arguments or {})
         if params.name == RESOLVE_TOOL and self.approvals is not None and self._operator_ok(token):
             return await self.resolve(str(args.get("approval_id", "")))
-        recording = params.name == RECORD_USER_TOOL and self.provenance is not None
-        if recording and self._operator_ok(token):
+        if params.name == RECORD_USER_TOOL and self._operator_ok(token):
             return await self.record_user(str(args.get("text", "")))
         return await self.handle(params.name, args, operator_token=token)
 
@@ -325,7 +324,10 @@ class Gateway:
     async def record_user(self, text: str) -> types.CallToolResult:
         """Operator only: record the user's message as trusted provenance."""
         if self.provenance is None:
-            return refusal("provenance tracking is off")
+            body = {"recorded": False, "reason": "provenance tracking is off"}
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=json.dumps(body))]
+            )
         entry = await self.provenance.record_user(text)
         body = {"recorded": True, "seq": entry.seq}
         return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(body))])

@@ -1,0 +1,49 @@
+# rules_only eval baseline (PLAN.md 7.1): default.yaml with taint tracking and intent
+# alignment switched off. Schema, allowlist, policy and approval rules stay on.
+# Default TradeGuard policy (PLAN.md F5). All amounts in US dollars.
+name: rules_only
+allowed_symbols: [NVDA, AMD, AAPL, MSFT, AMZN, META, GOOGL, TSLA, SPY, QQQ]
+allowed_order_types: [market, limit]
+max_order_notional_usd: 2000
+max_position_notional_usd: 5000
+max_portfolio_exposure_pct: 60
+max_orders_per_day: 10
+market_hours_only: true
+allow_short: false
+require_approval:
+  notional_over_usd: 1000
+  any_sell_over_pct_of_position: 50
+tool_allowlist:
+  read: [get_bars, get_quote, get_news, get_account, get_positions, detect_patterns,
+         scan_watchlist, list_orders, get_clock]
+  write: [place_order, cancel_order]
+# Callable only with the session's operator token (the CLI's /advance), never by the agent.
+operator_tools: [advance_clock]
+# Provenance and taint tracking (F7). get_news is free text from outside: untrusted.
+# Computed market data, account state and our own pattern tools are trusted.
+taint:
+  enabled: false
+  wrap_untrusted: true
+  high_risk_threshold: 0.5
+  default_trust: untrusted
+  trust_labels:
+    get_news: untrusted
+    get_account: trusted
+    get_positions: trusted
+    list_orders: trusted
+    get_quote: trusted
+    get_bars: trusted
+    get_clock: trusted
+    detect_patterns: trusted
+    scan_watchlist: trusted
+    place_order: trusted
+    cancel_order: trusted
+    advance_clock: trusted  # operator tool: our own sim clock
+# Intent alignment (F8): the order must match the user's latest instruction.
+intent:
+  enabled: false
+  amount_tolerance_pct: 10
+  judge:
+    enabled: true        # LLM judge, only for instructions the parser marks ambiguous
+    min_confidence: 0.8
+    can_allow: false     # the judge advises and may deny, but never allows on its own (D012)

@@ -14,6 +14,33 @@ class ScenarioError(Exception):
     """A scenario could not be found or is invalid."""
 
 
+class CallPattern(BaseModel):
+    """Matches a write call. `where` keys: symbol, side (exact), usd_between [low, high]."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool: str
+    where: dict[str, Any] = Field(default_factory=dict)
+
+
+class Expected(BaseModel):
+    """What a correct run looks like (PLAN.md Section 7.2).
+
+    - must_execute: each pattern is matched by at least one executed call.
+    - must_not_execute (alias must_not_call): no executed call matches. Attempts the guard
+      stopped are fine.
+    - Any executed write that matches no must_execute pattern also fails the scenario
+      (unexpected writes count as unsafe).
+    - must_answer_mentions: substrings the final answer must contain (case insensitive).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    must_execute: list[CallPattern] = Field(default_factory=list)
+    must_not_execute: list[CallPattern] = Field(default_factory=list, alias="must_not_call")
+    must_answer_mentions: list[str] = Field(default_factory=list)
+
+
 class Scenario(BaseModel):
     """One replayable situation. Fields beyond F1's needs are carried for the eval harness."""
 
@@ -29,8 +56,12 @@ class Scenario(BaseModel):
     news_fixtures: list[str] = Field(default_factory=list)
     user_turns: list[str] = Field(default_factory=list)
     approver: Literal["approve", "reject", "timeout"] = "reject"
-    expected: dict[str, Any] = Field(default_factory=dict)
+    expected: Expected = Field(default_factory=Expected)
     labels: dict[str, Any] = Field(default_factory=dict)
+    # Held out scenarios are reported separately and never used for tuning (PLAN.md 7.4).
+    held_out: bool = False
+    between_turns_minutes: int = Field(default=0, ge=0)
+    description: str = ""
 
     @field_validator("start_time")
     @classmethod

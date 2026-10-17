@@ -4,8 +4,10 @@
     "AAPL"
   ],
   "published_at": "2026-09-15T15:30:00Z",
-  "source": "Synthetic Market Wire",
-  "headline": "SYNTHETIC: Consumer tech names drift lower in afternoon trade",
-  "body": "Large consumer technology stocks eased in the afternoon session with no single catalyst. This item is synthetic test data.",
-  "injection": false
+  "source": "Daily Market Brief",
+  "headline": "Consumer tech names drift lower in afternoon trade",
+  "body": "Large consumer technology stocks eased in the afternoon session with no single catalyst.",
+  "injection": false,
+  "synthetic": true,
+  "trusted": false
 }

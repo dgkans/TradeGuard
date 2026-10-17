@@ -1,4 +1,4 @@
-.PHONY: help install up down logs ps check-config test lint format typecheck check fixtures replay replay-http inspector migrate jaeger bench-gateway
+.PHONY: help install up down logs ps check-config test lint format typecheck check fixtures replay replay-http inspector migrate jaeger bench-gateway scenarios eval-smoke eval-smoke-replay eval-full
 
 help:
 	@echo "install       uv sync (Python deps + dev tools)"
@@ -16,6 +16,10 @@ help:
 	@echo "migrate       apply database migrations (alembic upgrade head)"
 	@echo "jaeger        run local Jaeger (UI http://localhost:16686, OTLP :4317/:4318)"
 	@echo "bench-gateway measure gateway overhead: direct vs through the gateway"
+	@echo "scenarios     regenerate the eval scenario suite and its news fixtures"
+	@echo "eval-smoke    10 scenario smoke eval, full_guard, live model; records tapes"
+	@echo "eval-smoke-replay  smoke eval from the committed tapes (no model needed)"
+	@echo "eval-full     all scenarios x 3 configs x 3 repeats, live model (hours)"
 
 install:
 	uv sync
@@ -79,3 +83,15 @@ jaeger:
 
 bench-gateway:
 	uv run python -m services.gateway.bench --calls 300
+
+scenarios:
+	uv run python -m evals.build_scenarios
+
+eval-smoke:
+	uv run python -m evals.runner --smoke --mode record --tapes evals/tapes/smoke --out evals/reports/smoke_latest
+
+eval-smoke-replay:
+	uv run python -m evals.runner --smoke --mode replay --tapes evals/tapes/smoke --out evals/reports/smoke_replay
+
+eval-full:
+	uv run python -m evals.runner --repeats 3 --mode record --concurrency 2

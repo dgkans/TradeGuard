@@ -183,3 +183,22 @@ async def test_agent_explicit_order_after_news_goes_through() -> None:
     await run_agent(rig, [(NEWS_QUESTION, reads_news), ("Buy $500 of AMD", buys)])
     orders = rig.orders()
     assert len(orders) == 1 and orders[0]["symbol"] == "AMD"
+
+
+async def test_record_user_message_is_a_no_op_when_tracking_is_off() -> None:
+    """Regression: with taint and intent off (rules_only), the operator's report was refused
+    and crashed the caller."""
+    from services.gateway.policy.model import IntentConfig, TaintConfig
+
+    rig = Rig()
+    policy = load_policy(REPO_ROOT / "policies/default.yaml").model_copy(
+        update={"taint": TaintConfig(enabled=False), "intent": IntentConfig(enabled=False)}
+    )
+    gateway = Gateway([Upstream("replay", build_server(rig.session))], audit=rig.audit,
+                      session_id="off", policy=policy, operator_token=TOKEN)  # fmt: skip
+    async with gateway, Client(gateway.server) as client:
+        result = await client.call_tool("record_user_message", {"text": "hi"}, meta=OPERATOR)
+        forged = await client.call_tool("record_user_message", {"text": "hi"})
+    assert not result.is_error
+    assert body(result) == {"recorded": False, "reason": "provenance tracking is off"}
+    assert forged.is_error

@@ -1,0 +1,44 @@
+name: Eval
+
+# Manual trigger only (PLAN.md F9). CI has no LLM, so it replays the committed smoke tapes:
+# the agent's and judge's recorded responses go through the real gateway, policy, taint and
+# intent stages, and the job checks the smoke scenarios still pass.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --locked
+      - name: Smoke eval from recorded tapes
+        env:
+          OTEL_SDK_DISABLED: "true"
+        run: make eval-smoke-replay
+      - name: Replay matches the recorded outcomes
+        run: |
+          uv run python - <<'PY'
+          import json, sys
+          expected = json.load(open("evals/tapes/smoke/expected.json"))
+          actual = {}
+          for line in open("evals/reports/smoke_replay/records.jsonl"):
+              r = json.loads(line)
+              writes = [[w["tool"], w["outcome"], w["rule_id"]] for w in r["writes"]]
+              actual[r["scenario_id"]] = {"task_success": r["task_success"], "writes": writes}
+          diffs = [k for k in expected if expected[k] != actual.get(k)]
+          print(f"{len(expected) - len(diffs)}/{len(expected)} match the recording", diffs)
+          sys.exit(1 if diffs else 0)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-report
+          path: evals/reports/smoke_replay/

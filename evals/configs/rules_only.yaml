@@ -1,0 +1,4 @@
+# Gateway with schema, allowlist, policy and approval rules (F5, F6).
+name: rules_only
+gateway: true
+policy: policies/rules_only.yaml

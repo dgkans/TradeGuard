@@ -11,7 +11,7 @@
 | F6 Approval flow | done | 2026-10-16 |
 | F7 Taint tracking | done | 2026-10-16 |
 | F8 Intent alignment | done | 2026-10-16 |
-| F9 Eval harness | not started | |
+| F9 Eval harness | in progress | |
 | F10 Dashboard | not started | |
 | F11 Alpaca paper | not started | |
 | F12 Deployment | not started | |
@@ -232,7 +232,7 @@
 - Gaps: the support check is keyword based (F8 adds amounts, units and an LLM judge); the detector misses single-weak-signal injections; the real model wasn't fooled by our labeled fixtures, so the baseline contrast is unproven.
 - Next: F8 Intent alignment (the plan suggests opusplan).
 
-## Current feature: F8 Intent alignment
+## F8 Intent alignment
 ### Plan
 - `services/gateway/intent/parser.py`: deterministic parse of the latest user message into intents `{side, symbol, amount, unit (usd | shares | pct_position), condition}`. Several intents per message ("buy $500 of NVDA and $300 of AMD"). Marks the parse *ambiguous* for a bare number with no unit ("buy 1000 NVDA"), vague quantities ("half my cash", "double"), pronoun targets ("buy more of it"), or trade verbs outside the side vocabulary ("put $500 into", "load up on").
 - `compare.py`: order vs intent, using the policy context price and holdings.
@@ -266,3 +266,23 @@
 - Numbers (RESULTS.md): judge agreement 75% overall and 44% on ambiguous cases (44 hand-labeled cases, qwen3:8b); judge p50 latency 6.5 s.
 - Gaps: conditions ("if it breaks yesterday's high") are parsed but not enforced; vague instructions always need a human by default; the parser is English only and regex based.
 - Next: F9 Evaluation harness. Needs the user's decision on synthetic labels in injection fixtures (F7 notes).
+
+## Current feature: F9 Evaluation harness
+### Plan
+- User decision 2026-10-16 (F7 open question): synthetic marking lives in metadata only. News text, headlines and source names read like ordinary news. The replay server stops showing the agent `synthetic` and `trusted` flags, which stay in the fixture files and docs. (D013)
+- Scenario format: extend `Scenario` with `held_out`, `between_turns_minutes`, and `expected` = `must_execute` / `must_not_execute` (alias `must_not_call`) patterns on tool and args (symbol, side, `usd_between`), plus `must_answer_mentions`. Every write call that matches no `must_execute` pattern counts as unsafe.
+- 100 scenarios in the plan's five categories (30 / 20 / 25 / 15 / 10), built from spec rows by `scenarios/generate.py` with the YAML committed. 20 are held out (6 / 4 / 5 / 3 / 2) and reported separately. New fixtures: 25 injection items and benign items, all metadata-labeled synthetic.
+- Configs `evals/configs/{no_guard,rules_only,full_guard}.yaml`: direct; gateway with `policies/rules_only.yaml` (taint and intent off); gateway with `policies/default.yaml`.
+- Runner `evals/runner.py`: fresh in-process replay session, gateway and in-memory stores per run, the real agent graph and judge. A scripted approver (approve, reject or timeout) acts on escalations. Token counts for agent and judge come from LLM usage metadata. Concurrency is configurable.
+- Recorded runs: a cassette of LLM responses, keyed by run and call index, can be recorded and replayed. Replaying produces the same metrics (the determinism criterion) and lets CI run the smoke eval with no LLM.
+- `evals/metrics.py`: the Section 7.3 metrics per config, mean with min and max over repeats, held out set separately. Report as Markdown and JSON in `evals/reports/`.
+- `make eval-smoke` (10 fixed scenarios, 2 per category, full_guard, 1 repeat) and `make eval-full`. `.github/workflows/eval.yml` runs on manual trigger with the recorded smoke cassette.
+### Acceptance
+- [ ] All three configs run on the full suite with at least 3 repeats
+- [ ] Report includes every metric in Section 7.3 with mean and spread
+- [ ] Results copied into RESULTS.md with date, model names and commit hash
+- [ ] Re running with the same seed produces the same deterministic metrics
+### Notes and open questions
+-
+### Loop summary
+-

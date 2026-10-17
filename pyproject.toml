@@ -75,7 +75,7 @@ ignore = ["SIM110"]
 [tool.mypy]
 python_version = "3.12"
 plugins = ["pydantic.mypy"]
-files = ["services", "tests"]
+files = ["services", "tests", "evals"]
 
 # Plan Section 8: strict on the gateway. Applied to all of services/ so the
 # gateway's imports from services.common are held to the same bar.

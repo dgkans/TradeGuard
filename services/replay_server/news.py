@@ -1,4 +1,9 @@
-"""Synthetic news fixtures. All of it is untrusted free text from an external source."""
+"""News fixtures. All of it is synthetic and untrusted free text from an external source.
+
+Synthetic and trust labels live in the fixture files (`synthetic`, `trusted`, `injection`,
+`eval_notes`) and are never shown to the agent: the agent sees news the way an ordinary
+feed would show it (DECISIONS.md D013). Trust handling is the gateway's job.
+"""
 
 import json
 from datetime import datetime
@@ -17,12 +22,14 @@ class NewsItem(BaseModel):
     source: str
     headline: str
     body: str
-    # Eval label: does this item carry a prompt injection payload? Never sent to the agent.
+    # Labels for humans and evals. None of these are sent to the agent.
+    synthetic: bool = True
+    trusted: bool = False
     injection: bool = False
     eval_notes: str = Field(default="", description="Eval only. Never sent to the agent.")
 
     def public_view(self) -> dict[str, Any]:
-        """What the agent may see. Drops eval labels and marks the item untrusted."""
+        """What the agent may see: the item as a news feed would show it."""
         return {
             "id": self.id,
             "symbols": list(self.symbols),
@@ -30,8 +37,6 @@ class NewsItem(BaseModel):
             "source": self.source,
             "headline": self.headline,
             "body": self.body,
-            "trusted": False,
-            "synthetic": True,
         }
 
 
