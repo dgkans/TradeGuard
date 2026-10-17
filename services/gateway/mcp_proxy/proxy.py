@@ -27,6 +27,7 @@ from services.common import config
 from services.common.telemetry import current_ids
 from services.gateway.approvals import Approval, ApprovalStore
 from services.gateway.audit import AuditOutcome, AuditSink, DecisionRecord, summarize_result
+from services.gateway.intent.judge import Judge
 from services.gateway.pipeline.pipeline import Pipeline
 from services.gateway.pipeline.types import PolicyContext, ToolCall, Verdict
 from services.gateway.policy.model import Policy
@@ -102,6 +103,7 @@ class Gateway:
         approvals: ApprovalStore | None = None,
         approval_timeout_s: float = DEFAULT_APPROVAL_TIMEOUT_S,
         provenance: ProvenanceStore | None = None,
+        judge: Judge | None = None,
     ) -> None:
         self.upstreams = upstreams
         self.audit = audit
@@ -111,8 +113,9 @@ class Gateway:
         self.approvals = approvals
         self.approval_timeout_s = approval_timeout_s
         self.pipeline: Pipeline | None = None
+        self.judge = judge
         self.provenance: SessionProvenance | None = None
-        if policy is not None and policy.taint.enabled:
+        if policy is not None and (policy.taint.enabled or policy.intent.enabled):
             # Without an explicit store, keep provenance in this process only.
             self.provenance = SessionProvenance(session_id, provenance or MemoryProvenanceStore())
         self.tools: list[types.Tool] = []
@@ -149,7 +152,7 @@ class Gateway:
             schemas = {}
             for tool in self.tools:
                 schemas[tool.name] = dict(tool.input_schema)
-            self.pipeline = Pipeline(self.policy, schemas)
+            self.pipeline = Pipeline(self.policy, schemas, judge=self.judge)
         return self
 
     async def __aexit__(

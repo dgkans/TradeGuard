@@ -8,12 +8,13 @@ import pytest
 from services.gateway.pipeline import rules
 from services.gateway.pipeline.pipeline import Pipeline
 from services.gateway.pipeline.types import PolicyContext, ToolCall
-from services.gateway.policy.model import TaintConfig, load_policy
+from services.gateway.policy.model import IntentConfig, TaintConfig, load_policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# These tests cover stages 1, 2, 3 and 6. Taint (stage 4) is tested in tests/provenance.
+# These tests cover stages 1, 2, 3 and 6. Taint (stage 4) is tested in tests/provenance,
+# intent (stage 5) in tests/intent.
 POLICY = load_policy(REPO_ROOT / "policies/default.yaml").model_copy(
-    update={"taint": TaintConfig(enabled=False)}
+    update={"taint": TaintConfig(enabled=False), "intent": IntentConfig(enabled=False)}
 )
 PLACE_ORDER_SCHEMA = {
     "type": "object",

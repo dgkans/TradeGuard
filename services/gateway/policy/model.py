@@ -55,6 +55,26 @@ class TaintConfig(BaseModel):
         return self.trust_labels.get(tool, self.default_trust)
 
 
+class JudgeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = True
+    min_confidence: float = Field(default=0.8, ge=0, le=1)
+    # Whether a confident "aligned" judge verdict may ALLOW an ambiguous order. Off by
+    # default: measured judge agreement on ambiguous cases is low (DECISIONS.md D012).
+    can_allow: bool = False
+
+
+class IntentConfig(BaseModel):
+    """Intent alignment (F8). Off unless the policy turns it on."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    amount_tolerance_pct: float = Field(default=10, ge=0, le=100)
+    judge: JudgeConfig = Field(default_factory=JudgeConfig)
+
+
 class Policy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -72,6 +92,7 @@ class Policy(BaseModel):
     # Tools only the human operator may call (with the session operator token).
     operator_tools: list[str] = Field(default_factory=list)
     taint: TaintConfig = Field(default_factory=TaintConfig)
+    intent: IntentConfig = Field(default_factory=IntentConfig)
 
     @field_validator("allowed_symbols")
     @classmethod

@@ -32,6 +32,22 @@ Misclassified:
 
 Caveats: the same author wrote the snippets and the detector, so these numbers are optimistic. A precision of 1.0 on 30 self-written benign snippets says little about real news. The detector only raises the risk score; the taint rule decides, and blocks unsupported orders whatever the score. A larger, independently written set is needed before quoting this anywhere.
 
+## Intent judge: agreement with hand labels (F8) | 20261017T034558Z | code of the commit "F8: Intent alignment" (report says 390cde3-dirty)
+Source: `uv run python -m evals.judge_eval`, report `evals/reports/judge_20261017T034558Z.json`.
+Judge: ollama:qwen3:8b, prompt `judge_v1`, temperature 0, Ollama 0.40.5, Apple M5 16 GB.
+Dataset: `evals/datasets/intent_cases.jsonl`, 44 hand-labeled cases, sha256 `eaa1001f2448a02d096f3f079e07dadc93a32bc864aeb56b4218eda447b6030b`, frozen and committed (390cde3) before the judge prompt was written. One run, and the prompt was not changed after it.
+
+| Metric | Value |
+|---|---|
+| Agreement, all cases | 33/44 (75%) |
+| Agreement, cases the gateway sends to the judge (parser marked ambiguous) | 7/16 (44%) |
+| Judge errors (unusable output) | 0 |
+| Judge latency p50 / max | 6.5 s / 13.4 s |
+
+By category: ambiguous_unit 0/2 | amount 2/4 | amount_tolerance 1/2 | clear 5/5 | conditional 1/1 | delegated 2/2 | no_intent 4/4 | phrasing 7/13 | unit_confusion 4/4 | wrong_side 4/4 | wrong_symbol 3/3
+
+Reading: the judge does well on clear cases, but poorly on exactly the ambiguous phrasing it exists for. On the 16 cases the gateway would send it, it was confidently "aligned" (confidence 0.8 or more) on 5 of the 6 misaligned orders. Its confidence isn't calibrated (it often returns exactly 0.5). Because of this, the default policy no longer lets the judge ALLOW on its own (`intent.judge.can_allow: false`, DECISIONS.md D012). With that setting, the gateway escalates all 16 of these cases to a human: 0 wrongly allowed, and 6 correct orders also wait for review. That setting was chosen after seeing this run. Labels are mine; the two `ambiguous_unit` cases are labeled aligned, which is a judgment call.
+
 <!-- Template for each run:
 
 ## Run <date> | commit <hash>

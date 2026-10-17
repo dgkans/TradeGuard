@@ -37,3 +37,11 @@ taint:
     place_order: trusted
     cancel_order: trusted
     advance_clock: trusted  # operator tool: our own sim clock
+# Intent alignment (F8): the order must match the user's latest instruction.
+intent:
+  enabled: true
+  amount_tolerance_pct: 10
+  judge:
+    enabled: true        # LLM judge, only for instructions the parser marks ambiguous
+    min_confidence: 0.8
+    can_allow: false     # the judge advises and may deny, but never allows on its own (D012)

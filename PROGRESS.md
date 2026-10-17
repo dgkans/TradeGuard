@@ -10,7 +10,7 @@
 | F5 Policy engine | done | 2026-10-16 |
 | F6 Approval flow | done | 2026-10-16 |
 | F7 Taint tracking | done | 2026-10-16 |
-| F8 Intent alignment | in progress | |
+| F8 Intent alignment | done | 2026-10-16 |
 | F9 Eval harness | not started | |
 | F10 Dashboard | not started | |
 | F11 Alpaca paper | not started | |
@@ -249,12 +249,20 @@
 - Pipeline stage 5 runs after taint and before approval; an intent ESCALATE counts as approved on re-check after a human approval. Policy section `intent:` (enabled, tolerance, judge settings).
 - Labeled set of 40+ intent cases with hand labels, frozen and committed *before* the judge prompt is written. One judge run with qwen3:8b; agreement goes into RESULTS.md.
 ### Acceptance
-- [ ] Dollars vs shares confusion caught and escalated (tested)
-- [ ] Wrong symbol or side denied (tested)
-- [ ] Judge agreement with hand labels reported on at least 40 labeled cases
-- [ ] Judge only runs when deterministic parsing is ambiguous (logged and tested)
+- [x] Dollars vs shares confusion caught and escalated (tested both directions; in the gateway, "Buy $8 of NVDA" placed as 8 shares is held as `intent_unit_confusion`)
+- [x] Wrong symbol or side denied (tested in the comparator and the gateway)
+- [x] Judge agreement with hand labels reported on at least 40 labeled cases (44 cases: 33/44 overall, 7/16 on the cases the gateway sends to the judge; RESULTS.md)
+- [x] Judge only runs when deterministic parsing is ambiguous (logged in audit reasons and `tradeguard.intent.judge_ran`; tested with a counting fake judge, including a 3 message gateway session where it ran once)
 ### Notes and open questions
 - Open from F7, needed before F9: whether injection fixtures keep the in-text "SYNTHETIC" label (recommended: metadata only).
 - Labeled set `evals/datasets/intent_cases.jsonl` (44 cases, 21 aligned) frozen before the judge prompt was written: sha256 `eaa1001f2448a02d096f3f079e07dadc93a32bc864aeb56b4218eda447b6030b`. Labels are mine. The two `ambiguous_unit` cases ("buy 1000 NVDA" placed as $1000) are labeled aligned, which is a judgment call; the gateway escalates them regardless.
+- **Spec change after measurement (D012):** the judge may no longer ALLOW on its own by default (`intent.judge.can_allow: false`). qwen3:8b was confidently wrong on 5 of 6 misaligned ambiguous cases. Decided after seeing the eval; conservative direction.
+- Test updates: F5 and F6 rule tests run with intent off (no user message is reported there); the agent level approval flow now reports the user message as the CLI does.
+- Real model demos (qwen3:8b): "buy 1000 NVDA" was placed as 1000 shares and denied by order size before intent ran; "buy 5 NVDA" escalated `intent_ambiguous_unit` with both readings, and I rejected it via the API.
+- One cosmetic bug found in the demo (the reason said "has no unit" twice), fixed with a regression test.
 ### Loop summary
--
+- Built: deterministic intent parser and comparator, LLM judge (`judge_v1`, structured JSON, also the parsing fallback), intent stage 5 in the pipeline (re-checked after approval), `intent:` policy section with `judge.can_allow`, `JUDGE_MODEL`, LLM factory moved to `services/common`, `evals/judge_eval.py`.
+- Tests: 309 passing (56 new for F8); ruff and mypy strict clean.
+- Numbers (RESULTS.md): judge agreement 75% overall and 44% on ambiguous cases (44 hand-labeled cases, qwen3:8b); judge p50 latency 6.5 s.
+- Gaps: conditions ("if it breaks yesterday's high") are parsed but not enforced; vague instructions always need a human by default; the parser is English only and regex based.
+- Next: F9 Evaluation harness. Needs the user's decision on synthetic labels in injection fixtures (F7 notes).

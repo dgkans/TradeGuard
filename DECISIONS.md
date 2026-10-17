@@ -300,3 +300,47 @@ Consequences:
   provenance and Jaeger). Before F9, decide how injection fixtures stay labeled synthetic
   (metadata, source name) without telling the model in the text.
 - The detector misses injections that trip only one weak signal (4 of 30 in the set).
+
+## D012: Intent alignment (F8)
+Date: 2026-10-16
+Context: Catch orders that don't match what the user asked (wrong side or symbol,
+dollars vs shares, wrong size), deterministically where possible.
+Decision:
+- **Stage 5** of the pipeline, after taint and before approval, for `place_order`. It reads
+  the latest user message from session provenance (no provenance means DENY).
+- **Parser:** regex based, giving `{side, symbol, amount, unit, condition, delegated}` per
+  intent, with several intents per message. The amount nearest a symbol wins: before it
+  first, else after it. Condition text ("if ...") is captured and kept out of amount
+  parsing (so "drops 8%" isn't a size), but it isn't enforced.
+- **Comparator:** tolerance 10% on size. Larger than asked is a DENY, smaller is an
+  ESCALATE. The user's number used in the other unit is an ESCALATE
+  (`intent_unit_confusion`). Limit orders are sized at the limit price. A delegated symbol
+  ("the strongest breakout") accepts the agent's pick.
+- **Judge:** runs only when the parse is ambiguous: a bare number, vague words, a pronoun
+  or missing target, or a trade verb outside the side vocabulary. One JSON call returns
+  `{aligned, confidence, reason, intent}`; the `intent` field is the plan's LLM parsing
+  fallback. Prompt `judge_v1`, model `JUDGE_MODEL` (qwen3:8b). Prompt version, model and
+  whether the judge ran go into the audit reason and `tradeguard.intent.*` span attributes.
+- **Judge authority (changed after measurement):** the first design let a confident
+  judge ALLOW ambiguous orders. On the frozen labeled set, qwen3:8b was confidently
+  "aligned" on 5 of 6 misaligned ambiguous cases (RESULTS.md). The default policy now sets
+  `judge.can_allow: false`: the judge can DENY (confidently misaligned) and advises the
+  human reviewer, but every other ambiguous order escalates. An ambiguous unit always
+  escalates, whatever the judge says. This was decided after seeing the eval, in the
+  conservative direction (more human review).
+- The LLM factory moved to `services/common/llm.py`, so the gateway doesn't import agent
+  code. The judge prompt lives with the other versioned prompts in
+  `services/agent/prompts/`, as the plan specifies.
+Alternatives considered: LLM-first parsing (slower, non-deterministic, and the eval shows
+it misreads vague phrasing); a bigger judge model (doesn't fit the $0, 16 GB setup;
+revisit with Groq in F12); no judge (the plan requires one; it's still useful as context
+for the reviewer).
+Consequences:
+- Vague instructions ("put a little into AMD", "double my Apple") always need a human
+  under the default policy. F9 will show this in the escalation rate.
+- When the judge runs, it adds seconds per call (p50 6.5 s in the judge eval; 6.3 s for
+  the "buy 5 NVDA" demo call). It only runs on ambiguous orders.
+- Observed with qwen3:8b (manual runs, not an eval metric): "buy 1000 NVDA" was placed as
+  1000 shares ($212,740) and denied by `max_order_notional` before intent ran. "buy 5
+  NVDA" was placed as 5 shares and escalated `intent_ambiguous_unit`, with both readings
+  in the reason.

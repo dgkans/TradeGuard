@@ -10,6 +10,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from services.agent.approvals import wait_for_decision
 from services.agent.graph import AgentContext, build_graph, resume_turn, run_turn
+from services.agent.provenance import report_user_message
 from services.agent.tools import McpToolset, ToolCallLog
 from services.gateway.approvals import MemoryApprovalStore
 from services.gateway.audit import MemoryAuditSink
@@ -69,6 +70,7 @@ async def run_until_decision(rig: Rig, model: ScriptedChatModel, decide: Any) ->
     async with rig.gateway, McpToolset(rig.gateway.server, log=ToolCallLog()) as toolset:
         graph = build_graph(model, model, toolset.tools, context=context,
                             checkpointer=InMemorySaver())  # fmt: skip
+        await report_user_message(toolset, "Buy $1500 of NVDA", OPERATOR)
         first = await run_turn(graph, "Buy $1500 of NVDA", thread_id="t")
         assert first["answer"] is None
         pending = first["pending_approval"]

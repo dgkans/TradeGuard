@@ -18,9 +18,11 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.server.stdio import stdio_server
 
 from services.common.config import ConfigError, child_env, load_settings
+from services.common.llm import make_chat_model
 from services.common.telemetry import setup_tracing
 from services.gateway.approvals import ApprovalStore, MemoryApprovalStore, PostgresApprovalStore
 from services.gateway.audit import AuditSink, MemoryAuditSink, PostgresAuditSink, check_schema
+from services.gateway.intent.judge import Judge, LlmJudge
 from services.gateway.mcp_proxy.proxy import (
     OPERATOR_TOKEN_ENV,
     Gateway,
@@ -39,6 +41,10 @@ async def serve(args: argparse.Namespace) -> int:
     settings = load_settings()
     policy: Policy | None = None if args.policy == "none" else load_policy(args.policy)
     provider = setup_tracing("tradeguard-gateway", settings)
+    judge: Judge | None = None
+    if policy is not None and policy.intent.enabled and policy.intent.judge.enabled:
+        chat = make_chat_model(settings, json_mode=True, model=settings.judge_model)
+        judge = LlmJudge(chat, model=f"{settings.llm_provider}:{settings.judge_model}")
     replay_args = ["-m", "services.replay_server", "--scenario", args.scenario]
     if args.dev_tools:
         replay_args.append("--dev-tools")
@@ -74,6 +80,7 @@ async def serve(args: argparse.Namespace) -> int:
                     approvals=approvals,
                     approval_timeout_s=settings.approval_timeout_seconds,
                     provenance=provenance,
+                    judge=judge,
                 )
             )
             policy_name = policy.name if policy else "none (pass through)"

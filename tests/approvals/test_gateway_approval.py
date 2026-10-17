@@ -11,13 +11,17 @@ from services.agent.tools import McpToolset, ToolCallLog
 from services.gateway.approvals import MemoryApprovalStore
 from services.gateway.audit import MemoryAuditSink
 from services.gateway.mcp_proxy.proxy import OPERATOR_META_KEY, Gateway, Upstream
-from services.gateway.policy.model import load_policy
+from services.gateway.policy.model import IntentConfig, load_policy
 from services.replay_server.scenario import load_scenario
 from services.replay_server.server import build_server
 from services.replay_server.session import ReplaySession
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-POLICY = load_policy(REPO_ROOT / "policies/default.yaml")
+# Tests of the F5/F6 rules. Intent alignment (F8) is tested in tests/intent and
+# tests/gateway/test_intent_gateway.py; here no user message is reported.
+POLICY = load_policy(REPO_ROOT / "policies/default.yaml").model_copy(
+    update={"intent": IntentConfig(enabled=False)}
+)
 TOKEN = "op-test-token"  # noqa: S105 - test value
 OPERATOR = {OPERATOR_META_KEY: TOKEN}
 ESCALATING = {"symbol": "NVDA", "side": "buy", "notional": 1500}

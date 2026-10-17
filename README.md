@@ -166,3 +166,22 @@ not instructions" notice. A heuristic detector scores untrusted text for injecti
 and feeds the risk score; its precision and recall on a frozen labeled set are in
 [RESULTS.md](RESULTS.md), with caveats. Taint outcomes appear in `audit_events` reasons and
 as `tradeguard.taint.*` span attributes. Design: [DECISIONS.md](DECISIONS.md) D011.
+
+## Intent alignment (F8)
+
+Every order is compared with the user's latest message, parsed deterministically into side,
+symbol, amount, unit (dollars, shares or % of position) and condition:
+
+| User said | Order | Decision |
+|---|---|---|
+| "Buy $8 of NVDA" | 8 shares | ESCALATE `intent_unit_confusion` ($8 vs 8 shares = $1,702) |
+| "Buy $500 of NVDA" | sell NVDA | DENY `intent_wrong_side` |
+| "Buy $500 of AMD" | buy NVDA | DENY `intent_wrong_symbol` |
+| "Buy $500 of NVDA" | $1,500 | DENY `intent_amount_mismatch` |
+| "buy 5 NVDA" | 5 shares | ESCALATE `intent_ambiguous_unit` (both readings shown) |
+| "What's NVDA at?" | any order | DENY `intent_missing` |
+
+An LLM judge (`JUDGE_MODEL`, prompt `services/agent/prompts/judge_v1.md`) runs only when the
+parse is ambiguous. Its agreement with hand labels was low on exactly those cases (see
+[RESULTS.md](RESULTS.md)), so by default it advises the human reviewer and can deny, but
+never allows an order on its own (`intent.judge.can_allow: false`, D012).

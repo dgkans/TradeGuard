@@ -1,6 +1,6 @@
 """The gateway decision pipeline (PLAN.md Section 2). F5 implements stages 1, 2, 3 and 6.
 
-    1 schema check -> 2 tool allowlist -> 3 policy rules -> 4 taint -> [5 intent: F8]
+    1 schema check -> 2 tool allowlist -> 3 policy rules -> 4 taint -> 5 intent
     -> 6 approval rules -> 7 forward (done by the gateway on ALLOW)
 
 The first DENY wins. If nothing denies, the first ESCALATE wins. Otherwise ALLOW.
@@ -13,6 +13,8 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
+from services.gateway.intent.judge import Judge
+from services.gateway.intent.stage import IntentStage
 from services.gateway.pipeline.rules import APPROVAL_RULES, CONTEXT_RULES, STATIC_RULES, Rule
 from services.gateway.pipeline.types import PolicyContext, ToolCall, Verdict
 from services.gateway.policy.model import Policy
@@ -24,8 +26,14 @@ ORDER_TOOL = "place_order"
 
 
 class Pipeline:
-    def __init__(self, policy: Policy, tool_schemas: dict[str, dict[str, Any]]) -> None:
-        """`tool_schemas` maps each upstream tool name to its JSON input schema."""
+    def __init__(
+        self,
+        policy: Policy,
+        tool_schemas: dict[str, dict[str, Any]],
+        judge: Judge | None = None,
+    ) -> None:
+        """`tool_schemas` maps each upstream tool name to its JSON input schema. `judge` is
+        the intent judge, used only for ambiguous instructions."""
         self.policy = policy
         self.validators: dict[str, Draft202012Validator] = {}
         for name, schema in tool_schemas.items():
@@ -34,6 +42,7 @@ class Pipeline:
         self.context_rules: list[Rule] = [rule(policy) for rule in CONTEXT_RULES]
         self.approval_rules: list[Rule] = [rule(policy) for rule in APPROVAL_RULES]
         self.taint_rule = TaintRule(policy)
+        self.intent_stage = IntentStage(policy, judge)
 
     async def decide(
         self,
@@ -73,8 +82,12 @@ class Pipeline:
             taint = self.check_taint(call, provenance, skip_approval)
             if taint.decision != "ALLOW":
                 return taint
-            return Verdict("ALLOW", "policy_pass", f"write tool on the allowlist{note(taint)}",
-                           taint.attributes)  # fmt: skip
+            return Verdict(
+                "ALLOW",
+                "policy_pass",
+                f"write tool on the allowlist{note(taint)}",
+                taint.attributes,
+            )
 
         for rule in self.static_rules:
             result = rule.evaluate(call, None)
@@ -95,17 +108,42 @@ class Pipeline:
         taint = self.check_taint(call, provenance, skip_approval)
         if taint.decision != "ALLOW":
             return taint
+        intent = await self.check_intent(call, context, provenance, skip_approval)
+        attributes = {**taint.attributes, **intent.attributes}
+        if intent.decision != "ALLOW":
+            return Verdict(intent.decision, intent.rule_id, intent.reason, attributes)
+        notes = f"{note(taint)}{intent_note(intent)}"
         if skip_approval:
-            return Verdict("ALLOW", "policy_pass",
-                           f"re-check after human approval passed{note(taint)}",
-                           taint.attributes)  # fmt: skip
+            return Verdict(
+                "ALLOW", "policy_pass", f"re-check after human approval passed{notes}", attributes
+            )
         for rule in self.approval_rules:
             result = rule.evaluate(call, context)
             if not result.passed:
-                return Verdict(result.decision, result.rule_id, result.reason, taint.attributes)
-        return Verdict("ALLOW", "policy_pass",
-                       f"order passed every rule in {self.policy.name!r}{note(taint)}",
-                       taint.attributes)  # fmt: skip
+                return Verdict(result.decision, result.rule_id, result.reason, attributes)
+        return Verdict(
+            "ALLOW",
+            "policy_pass",
+            f"order passed every rule in {self.policy.name!r}{notes}",
+            attributes,
+        )
+
+    async def check_intent(
+        self,
+        call: ToolCall,
+        context: PolicyContext,
+        provenance: SessionProvenance | None,
+        skip_approval: bool,
+    ) -> Verdict:
+        """Stage 5. Needs the user's latest message, from provenance."""
+        if not self.policy.intent.enabled:
+            return Verdict("ALLOW", "intent_off", "")
+        if provenance is None:
+            reason = "intent alignment is on but no session provenance is available"
+            return Verdict("DENY", "provenance_unavailable", reason)
+        return await self.intent_stage.evaluate(
+            call, context, provenance.latest_user_text(), skip_approval=skip_approval
+        )
 
     def check_taint(
         self, call: ToolCall, provenance: SessionProvenance | None, skip_approval: bool
@@ -119,8 +157,9 @@ class Pipeline:
         result = self.taint_rule.evaluate(call, provenance)
         attributes = self.taint_rule.attributes(call, provenance)
         if result.decision == "ESCALATE" and skip_approval:
-            return Verdict("ALLOW", "taint_approved",
-                           f"human approved despite: {result.reason}", attributes)  # fmt: skip
+            return Verdict(
+                "ALLOW", "taint_approved", f"human approved despite: {result.reason}", attributes
+            )
         return Verdict(result.decision, result.rule_id, result.reason, attributes)
 
     def check_schema(self, call: ToolCall) -> Verdict | None:
@@ -147,6 +186,14 @@ def note(taint: Verdict) -> str:
     if taint.rule_id == "taint_clean":
         return "; taint: clean"
     return ""
+
+
+def intent_note(intent: Verdict) -> str:
+    if intent.rule_id in ("intent_off", ""):
+        return ""
+    if intent.rule_id == "intent_aligned":
+        return f"; intent: aligned ({intent.reason})"
+    return f"; intent: {intent.rule_id} ({intent.reason})"
 
 
 def error_path(error: Any) -> str:
