@@ -5,7 +5,7 @@
 | F0 Skeleton | done (compose + CI checks deferred to first push) | 2026-10-16 |
 | F1 Replay server | done | 2026-10-16 |
 | F2 Pattern detectors | done | 2026-10-16 |
-| F3 Baseline agent | not started | |
+| F3 Baseline agent | done | 2026-10-16 |
 | F4 Gateway proxy | not started | |
 | F5 Policy engine | not started | |
 | F6 Approval flow | not started | |
@@ -70,7 +70,7 @@
 - Gaps: no holiday calendar (D004); intraday scenarios limited to 2026-07-24..2026-10-16; F0 compose/CI checks still deferred to the first push.
 - Next: F2 Price action pattern detectors.
 
-## Current feature: F2 Price action pattern detectors
+## F2 Price action pattern detectors
 ### Plan
 - `services/patterns/` holds pure functions over any bar with `start, open, high, low, close, volume` (a Protocol, so it has no dependency on the replay server).
 - `atr(bars, n=14)`: Wilder ATR. `None` when there are too few bars.
@@ -94,3 +94,29 @@
 - Evals: none (the agent doesn't exist yet).
 - Gaps: thresholds are fixed, not tuned; levels use daily bars only; the bull flag is daily only, no intraday flags.
 - Next: F3 Baseline LangGraph agent (no guard).
+
+## Current feature: F3 Baseline LangGraph agent (no guard)
+### Plan
+- LLM: Ollama on the Mac (user choice 2026-10-16), model `qwen3:8b`, temperature 0, thinking off. `services/agent/llm.py` builds the chat model from `Settings`; groq/gemini give a clear "not wired yet" error until F12.
+- `services/agent/tools.py`: our own MCP-to-LangChain binding on the MCP SDK 2.x `Client` (`langchain-mcp-adapters` needs `mcp<2`). It hides dev only tools (`advance_clock`) from the model, and logs every call with arguments, result, error and latency to `runs/<thread>.jsonl`.
+- `services/agent/graph.py`: StateGraph `understand` (JSON: read_only / trade / other + summary) -> `plan` (short numbered steps) -> `act` (tool loop, max 20 tool calls) -> `respond`.
+- Prompts versioned in `services/agent/prompts/` (`system_v1.md`); the version is recorded in state and in the tool log.
+- Postgres checkpointer (`langgraph-checkpoint-postgres`) keyed by `--session`. Local Postgres from Homebrew (no Docker); CI gets a Postgres service.
+- CLI: `uv run tradeguard chat --scenario demo [--session ID] [--once "..."]`, with `/advance N` to move the sim clock (the agent itself can't).
+- Tests use a scripted fake chat model and an in-process replay server: read only answer, explicit order placed, checkpoint resume across new graph and connection, tool log contents, tool call cap, dev tools hidden.
+### Acceptance
+- [x] Agent answers read only questions using tools (tested with a scripted model; verified with qwen3:8b)
+- [x] Agent places a paper order on an explicit instruction (tested; verified with qwen3:8b)
+- [x] Session resumes after process restart (checkpoint tested against Postgres; verified across two CLI processes)
+- [x] Every run logs tool calls with arguments and results (`runs/<session>.jsonl`, tested)
+### Notes and open questions
+- The conversation resumes from the checkpoint, but the replay server's sim broker state restarts from the scenario on a new process. See D007.
+- Installed with Homebrew on the dev Mac: Ollama 0.40.5 + qwen3:8b, PostgreSQL 16 (role and database `tradeguard`), both running as brew services.
+- Smoke eval (Section 7.5) can't run until F9 builds the harness.
+- Manual runs with qwen3:8b: each turn took about 21 to 24 s locally (wall clock, including process start).
+### Loop summary
+- Built: LangGraph agent (understand/plan/act/respond), Ollama chat model factory, our own MCP-to-LangChain tool binding with JSONL call log, versioned prompts, Postgres checkpointer, `tradeguard chat` CLI with `/advance`.
+- Tests: 92 passing (8 new for F3, including the Postgres resume test); ruff and mypy strict clean.
+- Evals: none (harness is F9).
+- Gaps: replay account resets per process; groq/gemini not wired; baseline missed a failed breakout once in manual testing (D007).
+- Next: F4 Gateway proxy (pass through).

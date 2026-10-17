@@ -62,7 +62,7 @@ class Settings(BaseModel):
     llm_provider: Literal["ollama", "groq", "gemini"] = Field(
         default="ollama", alias="LLM_PROVIDER"
     )
-    llm_model: str = Field(default="", alias="LLM_MODEL")
+    llm_model: str = Field(default="qwen3:8b", alias="LLM_MODEL")
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
     groq_api_key: SecretStr | None = Field(default=None, alias="GROQ_API_KEY")
     gemini_api_key: SecretStr | None = Field(default=None, alias="GEMINI_API_KEY")

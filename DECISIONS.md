@@ -95,3 +95,37 @@ Consequences: sanity sweep on the committed data at 11:00 ET, all 20 symbols × 
 sessions (1,180 symbol-days): inside bar fired 126 times, prior day high break 449, bull
 flag 33. So every detector fires on real data. This is a development check, not an eval
 metric.
+
+## D007: Baseline agent stack (F3)
+Date: 2026-10-16
+Context: F3 needs a provider agnostic LangGraph agent bound to MCP tools, with a Postgres
+checkpointer, at $0.
+Decision:
+- **LLM:** Ollama 0.40.5 on the dev Mac (user choice 2026-10-16), model `qwen3:8b`
+  (Ollama id `500a1f067a9f`, Q4_K_M, 8.2B), temperature 0, seed 0, `num_ctx` 16384,
+  thinking off (`reasoning=False`). This is `LLM_MODEL`'s default. Ollama tags can be
+  re-pointed upstream, so every eval run records the id, not just the tag. Groq and Gemini
+  raise a clear error until F12 wires them up.
+- **MCP binding:** our own `McpToolset` (about 100 lines) on the MCP SDK 2.x `Client`, because
+  `langchain-mcp-adapters` 0.3.2 requires `mcp<2`. It filters dev only tools
+  (`advance_clock`) out of the model's tool list and logs every call (args, result or
+  error, latency, prompt version) to `runs/<session>.jsonl`.
+- **Graph:** understand (JSON mode classification) -> plan (numbered steps, injected into
+  the acting system prompt) -> act/tools loop (cap 20 calls per turn; calls over the cap get
+  "not executed" tool messages so the history stays valid) -> respond.
+- **Checkpointer:** `langgraph-checkpoint-postgres` against local Postgres 16 from Homebrew
+  (Docker isn't installed). CI runs a Postgres service container for the resume test.
+- **macOS quirk:** files under `.venv` here carried the `hidden` flag (probably iCloud
+  syncing the Desktop folder), and CPython skips hidden `.pth` files, which broke
+  `uv run tradeguard`. `make install` clears the flag.
+Alternatives considered: `langchain-mcp-adapters` (version conflict); LangGraph's
+`create_react_agent` (no understand/plan stages, which F8 intent checks build on); SQLite
+checkpointer (plan specifies Postgres; production uses Neon).
+Consequences:
+- The conversation resumes after a restart, but the replay server is a new process with the
+  scenario's starting account, so earlier paper orders are gone. Fixing that means
+  persisting or replaying sim broker state; revisit with the F4 audit log.
+- Observed in manual runs (not an eval metric): asked which stocks were breaking out,
+  qwen3:8b listed NVDA without noting `holding_above_high: false`. Asked to buy the
+  strongest breakout, it chose AMD correctly. The system prompt is left unchanged (v1)
+  so the baseline isn't tuned before scenarios exist (PLAN.md 7.4).

@@ -11,7 +11,9 @@ for what is done.
 
 ## Run locally
 
-Requirements: [uv](https://docs.astral.sh/uv/), Docker with Compose v2, make.
+Requirements: [uv](https://docs.astral.sh/uv/), make, PostgreSQL 16 (Docker Compose or
+`brew install postgresql@16`), and [Ollama](https://ollama.com) with `ollama pull qwen3:8b`
+for the agent.
 
 ```bash
 cp .env.example .env     # every variable is documented in the file
@@ -55,3 +57,20 @@ closed so far: prior day high break, inside bar, simplified bull flag, ATR(14), 
 support and resistance. Every fired pattern says which rule fired, the numbers behind it,
 and the timestamps of the bars that support it. Rules are in
 [services/patterns/README.md](services/patterns/README.md).
+
+## Baseline agent (F3, no guard)
+
+A LangGraph agent, `understand -> plan -> act (tool loop) -> respond`, that talks to the
+replay server over MCP. This is the `no_guard` baseline: nothing checks its orders yet.
+
+```bash
+uv run tradeguard chat --scenario demo                      # interactive
+uv run tradeguard chat --scenario demo --session s1 --once "Scan my watchlist and buy \$500 of the strongest breakout."
+uv run tradeguard chat --scenario demo --session s1         # resumes s1 from Postgres
+```
+
+In chat, `/advance N` moves the simulated clock (the agent cannot), `/clock` shows it, and
+`/quit` exits. Every tool call is printed and appended to `runs/<session>.jsonl`. The model
+defaults to `ollama:qwen3:8b` (see `LLM_PROVIDER` and `LLM_MODEL` in `.env.example`).
+Conversations resume after a restart, but the replay account starts fresh in each process
+([DECISIONS.md](DECISIONS.md) D007).

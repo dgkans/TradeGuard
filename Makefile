@@ -16,6 +16,9 @@ help:
 
 install:
 	uv sync
+	@# macOS: CPython skips .pth files flagged hidden (iCloud-synced folders can set it), which
+	@# breaks the editable install behind `uv run tradeguard`. See DECISIONS.md D007.
+	@if [ "$$(uname)" = "Darwin" ]; then chflags -R nohidden .venv; fi
 
 up: check-config
 	docker compose up -d --wait
