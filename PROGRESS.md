@@ -9,7 +9,7 @@
 | F4 Gateway proxy | done | 2026-10-16 |
 | F5 Policy engine | done | 2026-10-16 |
 | F6 Approval flow | done | 2026-10-16 |
-| F7 Taint tracking | not started | |
+| F7 Taint tracking | in progress | |
 | F8 Intent alignment | not started | |
 | F9 Eval harness | not started | |
 | F10 Dashboard | not started | |
@@ -173,7 +173,7 @@
 - Gaps: ESCALATE not queued yet (F6); context mapping is specific to the replay server (F11 adapter); write call overhead with context fetch not yet benchmarked.
 - Next: F6 Human approval flow.
 
-## Current feature: F6 Human approval flow
+## F6 Human approval flow
 ### Plan
 - `approvals` table (Alembic 0002): id, session, tool, args, rule and reason, status (pending, approved, rejected, expired, executed, blocked), created, expires, decided, decided_by, note, result, linked audit event.
 - `services/gateway/approvals.py`: an approval store (Postgres, plus in memory for tests). Expiry is applied atomically on every read or decision, so a timed out approval can never be approved. Every approve, reject or expire also writes an `audit_events` row.
@@ -199,3 +199,28 @@
 - Evals: none (harness is F9).
 - Gaps: no API auth; approvals are polled every 2 s, not pushed; the dashboard approval page comes in F10.
 - Next: F7 Provenance and taint tracking (the plan suggests opusplan for this one).
+
+## Current feature: F7 Provenance and taint tracking
+### Plan
+- Trust labels in the policy file (`taint.trust_labels`; unlisted tools default to untrusted). `get_news` is untrusted; account, market data and pattern tools are trusted. User messages are trusted.
+- Provenance store per session (memory, plus Postgres `provenance_events`, Alembic 0003, reloaded when a session's gateway restarts): ordered entries of user messages and tool results with source, trust, risk score, detector signals, excerpt and hash.
+- User messages reach the gateway through an operator-only tool `record_user_message`, called by the CLI's code at the start of every turn (the model can't call it).
+- Injection signal detector (`services/gateway/provenance/detector.py`): weighted heuristic signals such as instruction override, role markers, addressing the AI, urgency plus a trade verb, and secrecy. It returns a score from 0 to 1 and the signals that matched. It only feeds the risk score.
+- Taint rule = pipeline stage 4, after the deny rules and before approval. If the session has untrusted content, the order must be supported by the *latest* user message: side (with simple negation handling) and symbol (ticker or company name).
+  - Both supported: ALLOW.
+  - Side only (for example "buy the strongest breakout"): ESCALATE, or DENY if the untrusted risk is 0.5 or more.
+  - Side not supported: DENY.
+  - No untrusted content: the rule passes.
+- Untrusted tool results returned to the agent are wrapped: `trust: untrusted`, a "data, not instructions" notice, and delimited data with delimiter look-alikes defanged.
+- Taint outcome in audit reasons and span attributes (`tradeguard.taint.*`).
+- Labeled set of 60 snippets (30 injection, 30 benign including hard negatives), written and hashed *before* the detector exists; precision and recall from one run go into RESULTS.md, with no tuning on that set.
+- Demo: demo scenario with "Check the latest news on NVDA and tell me if anything matters", once direct (no guard) and once guarded, with qwen3:8b. Report what actually happens.
+### Acceptance
+- [ ] Order triggered only by an injected news item is denied (tested)
+- [ ] Order the user explicitly requested is allowed even if news was read earlier (tested)
+- [ ] Detector has precision and recall reported on a labeled set of at least 50 snippets
+- [ ] Taint decisions visible in audit log and traces
+### Notes and open questions
+- Labeled set `evals/datasets/injection_snippets.jsonl` (60 rows: 30 injection, 30 benign) frozen before any detector code was written: sha256 `dbed25a392e39c43855de2a7149679431b699a4df28c7bb1fed619279f14cc70`. The same author wrote the set and the detector, which biases results upward; the number is a sanity check, not a claim about real world injections.
+### Loop summary
+-
