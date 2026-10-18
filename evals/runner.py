@@ -26,6 +26,7 @@ import yaml
 from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.memory import InMemorySaver
 
+from evals.attacker import AGENT_NAME, AgentFactory, attacker_factory, load_labels
 from evals.cassette import Mode, TapeExhaustedError, TapeFactory
 from evals.records import EXECUTED, RunRecord, WriteAttempt
 from evals.report import write_report
@@ -188,8 +189,13 @@ def judge_task(scenario: Scenario, writes: list[WriteAttempt], answer: str) -> l
 
 
 async def run_one(
-    scenario: Scenario, config: EvalConfig, repeat: int, llm: TapeFactory
+    scenario: Scenario,
+    config: EvalConfig,
+    repeat: int,
+    llm: TapeFactory,
+    agent: AgentFactory | None = None,
 ) -> RunRecord:
+    """One scenario run. `agent` replaces the LLM agent (the judge still comes from `llm`)."""
     run_key = f"{scenario.id}__{config.name}__r{repeat}"
     started = time.perf_counter()
     prices = start_prices(scenario)
@@ -201,7 +207,11 @@ async def run_one(
     tape = None
     try:
         tape = llm.tape(run_key)
-        chat, json_chat, judge_chat = llm.models(tape)
+        taped_chat, taped_json, judge_chat = llm.models(tape)
+        chat: BaseChatModel = taped_chat
+        json_chat: BaseChatModel = taped_json
+        if agent is not None:
+            chat, json_chat = agent(scenario)
         target: Any = build_server(session, dev_tools=True)
         gateway = None
         if config.gateway:
@@ -360,6 +370,7 @@ async def run_suite(
     llm: TapeFactory,
     concurrency: int,
     records_path: Path,
+    agent: AgentFactory | None = None,
 ) -> list[RunRecord]:
     """Run everything not already in `records_path`; return all records (old and new)."""
     done = {record.run_key: record for record in read_records(records_path)}
@@ -378,7 +389,7 @@ async def run_suite(
     async def one(scenario: Scenario, config: EvalConfig, repeat: int) -> RunRecord:
         nonlocal finished
         async with gate:
-            record = await run_one(scenario, config, repeat, llm)
+            record = await run_one(scenario, config, repeat, llm, agent)
         async with lock:
             with records_path.open("a") as handle:
                 handle.write(json.dumps(record.to_json(), default=str) + "\n")
@@ -423,6 +434,12 @@ def main(argv: list[str] | None = None) -> int:
         default=ROOT / "scenarios",
         help="scenario folder (default scenarios/; scenarios_hard/ for F9b)",
     )
+    parser.add_argument(
+        "--agent",
+        choices=["llm", "attacker"],
+        default="llm",
+        help="attacker: the scripted worst case agent, on the injection scenarios only",
+    )
     args = parser.parse_args(argv)
     logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per LLM call is noise
 
@@ -438,6 +455,13 @@ def main(argv: list[str] | None = None) -> int:
         repeats = args.repeats
     if args.scenarios:
         suite = [s for s in suite if s.id in set(args.scenarios)]
+    agent = None
+    agent_meta: dict[str, Any] = {}
+    if args.agent == "attacker":
+        labels = load_labels(ROOT / "evals/datasets/attack_payloads.yaml")
+        suite = [s for s in suite if s.id in labels]
+        agent = attacker_factory(labels)
+        agent_meta = {"agent_model": AGENT_NAME, "agent": "attacker"}
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out = args.out or ROOT / "evals/reports" / f"run_{'smoke_' if args.smoke else ''}{stamp}"
     tapes = args.tapes or out / "tapes"
@@ -451,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
             llm=llm,
             concurrency=args.concurrency,
             records_path=out / "records.jsonl",
+            agent=agent,
         )
     )
     report = write_report(
@@ -462,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
             "smoke": args.smoke,
             "repeats": repeats,
             "suite": args.suite_dir.name,
+            **agent_meta,
         },
     )
     print(f"report: {report}")
