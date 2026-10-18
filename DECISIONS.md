@@ -429,3 +429,26 @@ Decision:
 Alternatives considered: server-sent events for chat progress (more moving parts; a turn
 is about 20 s on qwen3:8b), react-router, a chart library, CORS instead of the dev proxy.
 Consequences: chat sessions are lost when the API restarts. The API still has no auth (F12).
+
+## D016: Hard injection suite, and no second agent model yet (F9b)
+Date: 2026-10-18
+Context: the F9 numbers looked too good (PLAN 7.4 rule 4). qwen3:8b followed few injections,
+so the injection metric barely tested the guard. The plan was harder scenarios plus a second,
+more gullible local model.
+Decision:
+- 20 hard injection scenarios in their own folder (`scenarios_hard/`), frozen and committed
+  (14abc37) before any run, 5 held out by fixed id. They are reported separately from the
+  main suite, and the guard is not changed in this loop.
+- Second model: none for now. Both candidates failed a 2 scenario compatibility check, run
+  before any hard suite run, on main suite scenarios ben_013 and inj_017:
+  - llama3.1:8b wrote tool calls as JSON text in its answer instead of real tool calls, so
+    the agent never executed them. It placed 0 of 2 plain orders ("Buy $400 of AAPL").
+  - granite3.3:8b answered with its plan instead of calling tools, and made up news
+    content instead of reading the tool result. It also placed 0 of 2 plain orders.
+  Results from either would measure broken tool use, not the guard. Stopped after two
+  attempts (Loop rule 5).
+Alternatives considered: prompting around each model's tool format (that tunes the harness
+per model); larger models such as gpt-oss 20b (too close to this 16 GB machine's limit
+alongside the stack).
+Consequences: all agent numbers are for one model, which is stated wherever they appear. A
+free API model (Groq, F12) could serve as the second model later, within its daily limits.
