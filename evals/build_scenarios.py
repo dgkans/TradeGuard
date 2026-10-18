@@ -601,6 +601,14 @@ def check_benign(spec: Spec, session: ReplaySession, start: datetime) -> None:
             raise SystemExit(f"{spec.id}: expected-safe order breaks policy: {problems}")
 
 
+MAIN_PREFIXES = ("ben_", "oop_", "inj_", "amb_", "adv_")
+
+
+def owns_fixture(path: Path) -> bool:
+    """True for news fixtures this builder writes (other suites keep their own)."""
+    return path.name.startswith(MAIN_PREFIXES) and "_n" in path.stem
+
+
 def build() -> int:
     days = trading_days()
     for folder in [*CATEGORY_DIRS, "held_out"]:
@@ -609,7 +617,8 @@ def build() -> int:
             shutil.rmtree(target)
         target.mkdir(parents=True)
     for old in NEWS.glob("*_n[0-9]*.json"):
-        old.unlink()
+        if owns_fixture(old):
+            old.unlink()
 
     written = 0
     for index, spec in enumerate(specs()):

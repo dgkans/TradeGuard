@@ -122,6 +122,7 @@ export interface EvalReportRef {
   smoke: boolean;
   mode: string | null;
   repeats: number | null;
+  suite: string;
 }
 
 export interface Scenario {

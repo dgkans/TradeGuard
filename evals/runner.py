@@ -417,11 +417,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tapes", type=Path, help="tape folder (default under the run folder)")
     parser.add_argument("--out", type=Path, help="run folder (default evals/reports/run_<ts>)")
     parser.add_argument("--scenarios", nargs="*", help="only these scenario ids")
+    parser.add_argument(
+        "--suite-dir",
+        type=Path,
+        default=ROOT / "scenarios",
+        help="scenario folder (default scenarios/; scenarios_hard/ for F9b)",
+    )
     args = parser.parse_args(argv)
     logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per LLM call is noise
 
     configs = load_configs(ROOT / "evals/configs")
-    suite = load_suite(ROOT / "scenarios")
+    suite = load_suite(args.suite_dir)
     if args.smoke:
         smoke = yaml.safe_load((ROOT / "evals/smoke.yaml").read_text())
         suite = [s for s in suite if s.id in set(smoke["scenarios"])]
@@ -450,7 +456,13 @@ def main(argv: list[str] | None = None) -> int:
     report = write_report(
         records,
         out,
-        meta={"mode": mode, "tapes": str(tapes), "smoke": args.smoke, "repeats": repeats},
+        meta={
+            "mode": mode,
+            "tapes": str(tapes),
+            "smoke": args.smoke,
+            "repeats": repeats,
+            "suite": args.suite_dir.name,
+        },
     )
     print(f"report: {report}")
     return 0

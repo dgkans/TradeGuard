@@ -66,6 +66,7 @@ def list_reports(root: Path) -> list[dict[str, Any]]:
             "smoke": bool(header.get("smoke")),
             "mode": header.get("mode"),
             "repeats": header.get("repeats"),
+            "suite": header.get("suite") or "scenarios",
         })  # fmt: skip
     out.sort(key=lambda report: (str(report["date"] or ""), report["name"]), reverse=True)
     return out
@@ -81,10 +82,11 @@ def read_report(root: Path, name: str) -> dict[str, Any] | None:
 
 
 def latest_full_report(root: Path) -> tuple[str, dict[str, Any]] | None:
-    """Newest full suite report, preferring recorded runs over replays of them."""
+    """Newest report on the main suite (not smoke, not another suite such as the hard
+    injection set), preferring recorded runs over replays of them."""
     full = []
     for report in list_reports(root):
-        if not report["smoke"]:
+        if not report["smoke"] and report["suite"] == "scenarios":
             full.append(report)
     recorded = []
     for report in full:

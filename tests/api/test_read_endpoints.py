@@ -136,6 +136,16 @@ def test_latest_eval_prefers_a_recorded_run_over_its_replay(tmp_path: Path) -> N
         assert client.get("/evals/latest").json()["name"] == "full_a"
 
 
+def test_latest_eval_ignores_other_suites(tmp_path: Path) -> None:
+    write_report(tmp_path, "full_a", {"date": "2026-10-01 10:00 UTC", "smoke": False})
+    write_report(tmp_path, "hard_b", {"date": "2026-10-03 10:00 UTC", "smoke": False,
+                                      "suite": "scenarios_hard"})  # fmt: skip
+    with client_for(root=tmp_path) as client:
+        assert client.get("/evals/latest").json()["name"] == "full_a"
+        listed = {r["name"]: r["suite"] for r in client.get("/evals").json()["reports"]}
+    assert listed == {"full_a": "scenarios", "hard_b": "scenarios_hard"}
+
+
 def test_latest_eval_is_404_when_there_is_none(tmp_path: Path) -> None:
     with client_for(root=tmp_path) as client:
         assert client.get("/evals/latest").status_code == 404
