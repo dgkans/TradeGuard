@@ -69,3 +69,34 @@ async def test_unreachable_database_fails_on_connect() -> None:
     with pytest.raises(psycopg.OperationalError):
         async with PostgresAuditSink(bad):
             pass
+
+
+async def test_reader_filters_pages_and_counts_rules() -> None:
+    from services.gateway.audit import AuditQuery, PostgresAuditReader
+
+    migrate(database_url())
+    session_id = f"pg-read-{uuid.uuid4().hex[:8]}"
+    ids = []
+    async with PostgresAuditSink(database_url()) as sink:
+        for decision, rule in [("ALLOW", "pass"), ("DENY", "max_order_notional"),
+                               ("ESCALATE", "approval_notional")]:  # fmt: skip
+            ids.append(await sink.record_decision(DecisionRecord(
+                session_id=session_id, upstream="replay", tool="place_order",
+                args={"symbol": "NVDA"}, decision=decision, rule_id=rule,  # type: ignore[arg-type]
+                reason="r",
+            )))  # fmt: skip
+    async with PostgresAuditReader(database_url()) as reader:
+        events = await reader.list_events(AuditQuery(session_id=session_id))
+        denied = await reader.list_events(AuditQuery(session_id=session_id, decision="DENY"))
+        older = await reader.list_events(
+            AuditQuery(session_id=session_id, limit=1, before_id=ids[2])
+        )
+        counts = await reader.rule_counts()
+    assert [e["id"] for e in events] == list(reversed(ids))
+    assert isinstance(events[0]["created_at"], str)
+    assert events[0]["args"] == {"symbol": "NVDA"}
+    assert [e["rule_id"] for e in denied] == ["max_order_notional"]
+    assert [e["id"] for e in older] == [ids[1]]
+    pairs = {(row["rule_id"], row["decision"]) for row in counts}
+    assert ("max_order_notional", "DENY") in pairs
+    assert all(row["decision"] != "ALLOW" for row in counts)

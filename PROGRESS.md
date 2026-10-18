@@ -12,7 +12,7 @@
 | F7 Taint tracking | done | 2026-10-16 |
 | F8 Intent alignment | done | 2026-10-16 |
 | F9 Eval harness | done | 2026-10-17 |
-| F10 Dashboard | not started | |
+| F10 Dashboard | done | 2026-10-18 |
 | F11 Alpaca paper | not started | |
 | F12 Deployment | not started | |
 | F13 Impact and beta | not started | |
@@ -303,3 +303,49 @@
 - Evals: smoke 10/10. Full suite: tuning task success no_guard 60.0%, rules_only 90.0%, full_guard 96.2%. Unsafe orders executed per repeat (tuning) 30 → 5 → 0. Escalation rate full_guard 20.1%. Held out task success 60.0% / 95.0% / 100.0%. See RESULTS.md and its caveats.
 - Gaps: injection category too easy for qwen3:8b; only one model evaluated; overhead measured on a loaded laptop with an in-memory audit sink; full tapes not committed (gitignored, 3.6 MB).
 - Next: F10 Dashboard, or harder injection scenarios first (user decision above).
+
+## F10 Dashboard
+### Plan
+- Backend `services/api/` (the dashboard API; the gateway still never imports agent code). `tradeguard api` serves:
+  - `/approvals` (moved in from the F6 app).
+  - `/audit`: audit events with filters, newest first, and a Jaeger trace link per event.
+  - `/policies`: the YAML files, plus how often each rule fired, from `audit_events`.
+  - `/evals`: report list and the latest full report JSON. Names are checked against the list, so no path traversal.
+  - `/scenarios` and `/chat/sessions`.
+- Chat sessions: each runs the real agent, either through the gateway subprocess or direct, exactly like `tradeguard chat`. Each session is a single background task that owns its MCP connection; MCP's stdio client must be opened and closed in the same task. One turn at a time per session (409 if busy), at most 5 open sessions. A turn that escalates returns the pending approval. `/resume` waits for the human decision, from the chat card or the Approvals page, then finishes the turn.
+- Audit reads: `AuditReader` (memory and Postgres) with `list_events` and `rule_counts`.
+- Frontend `dashboard/`:
+  - Vite 7, React 19, TypeScript 5.9 strict, react-router.
+  - ESLint with `no-explicit-any` as an error.
+  - Vitest, Testing Library and jsdom.
+  - No UI library; plain CSS with color tokens and dark mode.
+  - Charts are small SVG components (no chart library).
+  - Dev server proxies `/api` to the API on :8000, so no CORS is needed locally.
+- Pages: Chat (scenario picker, guarded or direct, tool calls inline, approval card), Approvals (pending queue, polling, approve/reject with note, recently decided), Audit log (filterable table, trace links), Policies (YAML viewer, most-fired rules chart), Evals (latest report: header, three config tables, metric charts, per category table, link to RESULTS.md caveats).
+- Phone width: a single column, nav that scrolls sideways, and tables that scroll inside their own box. I'll check it with a headless Chrome screenshot at 390 px.
+- Tests:
+  - pytest for every new endpoint, including chat with a scripted model and an in-process gateway, and an approval decided mid-turn.
+  - Vitest for approval actions (approve, reject, conflict error) and audit table rendering.
+- Make targets `dashboard-install`, `dashboard`, `dashboard-check`; a CI job for the dashboard. README gets a two minute walkthrough script.
+- Still no auth: the API binds to 127.0.0.1. F12 adds auth before anything is public.
+### Acceptance
+- [x] TypeScript strict mode, no `any` in app code (`strict` plus `noUncheckedIndexedAccess`; ESLint `no-explicit-any` and `no-non-null-assertion` as errors; a grep finds `any` only in a comment)
+- [x] All five pages work against the local stack. Checked against Postgres, Ollama qwen3:8b and Jaeger through the dev proxy: a real guarded chat turn escalated `approval_notional`, was approved through the API, executed once (`human_approved`) and the turn finished. Audit rows link to Jaeger traces; policies, rule counts and the latest eval report load.
+- [x] Vitest tests for approval actions and audit table rendering (16 tests: approve, reject, 409 conflict, no double submit, empty and error states; audit rows, badges, overhead, trace links, session filter; plus Evals and Chat pages)
+- [x] Works at phone width. All five pages are exactly 390 px wide in a 390 px frame (headless Chrome, scroll width measured), with no horizontal page scroll. Wide tables scroll inside their own box.
+### Notes and open questions
+- Alpaca paper sessions in Chat come with F11; F10 offers replay scenarios only.
+- The tests and the dev stack share the local database, so "Rules that fired most" and Recent decisions include rows the test suite wrote (for example `human_rejection`). A separate test database is worth doing in F12.
+- Agent wording issue found in the live check: after an approved market order (which fills on the next bar), qwen3:8b said "your position is now 10 shares". The data was right (10 shares held before, cash reserved for the order). This is an agent prompt issue, not the dashboard.
+- Headless Chrome won't shrink a window below about 500 px, so the phone check used a same-origin 390 px iframe (temporary page, removed).
+- Dependencies were picked with the 2 week rule and audited, and npm 11 made the lockfile (D015).
+### Loop summary
+- Built:
+  - `services/api` dashboard API: approvals, audit with paging and trace links, rules fired, policies, eval reports, scenarios, and chat sessions running the real agent and gateway subprocess, one task per session, approvals decided mid-turn.
+  - `AuditReader` (memory and Postgres).
+  - React and TypeScript dashboard with five pages, plain CSS with dark mode, SVG charts.
+  - Make targets and a CI job; README two minute walkthrough; D015.
+- Tests: Python 348 passing (17 new: API endpoints, chat flows, Postgres audit reader); Vitest 16 passing; ruff, mypy strict, eslint and tsc clean; production build OK.
+- Evals: smoke replay 10/10 matches the recording; live smoke 10/10 on qwen3:8b. No new numbers for RESULTS.md.
+- Gaps: no API auth (F12); chat sessions are lost when the API restarts; test data shares the dev database; harder injection scenarios are still queued from F9.
+- Next: harder injection scenarios (queued from F9, needs an overnight eval), then F11 Alpaca paper.

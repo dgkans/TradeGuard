@@ -48,6 +48,26 @@ jobs:
       - name: Tests
         run: uv run pytest
 
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint, type check, tests, build
+        run: npm run check
+
   compose:
     runs-on: ubuntu-latest
     steps:

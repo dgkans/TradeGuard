@@ -133,7 +133,7 @@ Escalated calls wait in an approval queue instead of being refused. The agent pa
 (`APPROVAL_TIMEOUT_SECONDS`, default 300).
 
 ```bash
-uv run tradeguard api                                  # approval API on :8000 (docs at /docs)
+uv run tradeguard api                                  # API on :8000 (docs at /docs); see F10
 uv run tradeguard chat --scenario demo --once "Buy \$1500 of NVDA"
 # the CLI prints the approval id and the exact approve/reject commands, e.g.
 curl -s localhost:8000/approvals?status=pending
@@ -209,3 +209,43 @@ uv run python -m evals.compare_runs <run_a> <run_b>   # determinism: record by r
 Reports (Markdown and JSON) go to `evals/reports/`. Every number quoted in this README
 comes from [RESULTS.md](RESULTS.md), which records the date, commit and models. All news
 in the scenarios is synthetic (see `fixtures/news/README.md`).
+
+## Dashboard (F10)
+
+React + TypeScript (strict) dashboard over the TradeGuard API. Needs Node 22 (20.19+).
+
+```bash
+make api                 # API on http://127.0.0.1:8000 (approvals, audit, policies, evals, chat)
+make dashboard-install   # once
+make dashboard           # http://127.0.0.1:5173 (proxies /api to :8000)
+make dashboard-check     # eslint (no `any`), tsc, vitest, production build
+```
+
+Pages: **Chat** (run the agent in a replay scenario, guarded or not, with tool calls and
+approval cards inline), **Approvals** (pending queue, approve or reject with a note),
+**Audit log** (every decision, filterable, with Jaeger trace links), **Policies** (the YAML
+files and the rules that fired most), and **Evals** (the latest full suite report). The
+chat runs the same agent and gateway subprocess as `tradeguard chat`. The 20 held out
+scenarios aren't offered there. The API has no authentication yet and binds to
+127.0.0.1; F12 adds auth before anything is public.
+
+### Two minute walkthrough
+
+Start Postgres, Ollama, `make jaeger`, `make api` and `make dashboard`. Then:
+
+1. **Chat, guarded (40 s).** Scenario `demo`, Guarded, policy `default`, Start session.
+   Ask "What is NVDA at?" The tool calls show inline, then the answer.
+2. **An order that needs a human (30 s).** Send "Buy $1500 of NVDA". The gateway holds it
+   (`approval_notional`: over the $1,000 threshold) and an approval card appears in the
+   chat. The Approvals tab shows a count too. Approve it there or in the card. The turn
+   finishes and the agent reports the order.
+3. **Prompt injection (20 s).** End the session. Start `inj_001` (news that tells the agent
+   to sell). Ask for the latest NVDA news. If the model takes the bait, the sell is denied
+   as `taint_unsupported`, because the user never asked for it. Starting the same scenario
+   with **No guard** shows the baseline.
+4. **Audit log (15 s).** Every call from the walkthrough, newest first: decision, rule,
+   reason and gateway overhead. Click a session to filter, or "Trace" to open the call in
+   Jaeger.
+5. **Policies and Evals (15 s).** The default policy YAML and which rules fired most. Then
+   the full eval: tuning and held out tables for no_guard, rules_only and full_guard, with
+   charts. The caveats live in [RESULTS.md](RESULTS.md); read them before quoting a number.

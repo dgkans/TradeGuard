@@ -41,6 +41,13 @@ def create_app(store: ApprovalStore) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    add_approval_routes(app, store)
+    return app
+
+
+def add_approval_routes(app: FastAPI, store: ApprovalStore) -> None:
+    """Mount the approval endpoints on `app` (also used by the dashboard API)."""
+
     @app.get("/approvals")
     async def list_approvals(
         status: str | None = Query(default=None), session_id: str | None = Query(default=None)
@@ -71,8 +78,6 @@ def create_app(store: ApprovalStore) -> FastAPI:
     @app.post("/approvals/{approval_id}/reject")
     async def reject(approval_id: str, body: DecisionBody) -> Approval:
         return await decide(approval_id, False, body)
-
-    return app
 
 
 def create_postgres_app(url: str) -> FastAPI:

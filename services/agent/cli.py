@@ -185,12 +185,12 @@ def gateway_stats(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def run_api(settings: Settings) -> int:
-    """Serve the approval API on API_HOST:API_PORT against DATABASE_URL."""
+    """Serve the dashboard API (approvals, audit, policies, evals, chat) on API_HOST:API_PORT."""
     import uvicorn
 
-    from services.gateway.api.app import create_postgres_app
+    from services.api.app import create_postgres_app
 
-    app = create_postgres_app(settings.database_url.get_secret_value())
+    app = create_postgres_app(settings)
     uvicorn.run(app, host=settings.api_host, port=settings.api_port, log_level="warning")
     return 0
 
@@ -209,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     chat_cmd.add_argument("--policy", default="policies/default.yaml", help="gateway policy")
     stats_cmd = commands.add_parser("gateway-stats", help="gateway overhead for a session")
     stats_cmd.add_argument("--session", required=True)
-    commands.add_parser("api", help="run the approval API (APPROVAL_* and API_* settings)")
+    commands.add_parser("api", help="run the dashboard API (APPROVAL_* and API_* settings)")
     args = parser.parse_args(argv)
 
     try:

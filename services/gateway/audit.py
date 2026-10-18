@@ -7,6 +7,7 @@ fails, the gateway denies the call), then the outcome after the upstream returns
 import asyncio
 import json
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal, Protocol
@@ -62,6 +63,7 @@ class MemoryAuditSink:
     async def record_decision(self, record: DecisionRecord) -> int:
         event = asdict(record)
         event["id"] = len(self.events) + 1
+        event["created_at"] = datetime.now(UTC).isoformat()
         self.events.append(event)
         return int(event["id"])
 
@@ -137,6 +139,151 @@ class PostgresAuditSink:
                 (outcome.latency_ms, outcome.upstream_ms, outcome.overhead_ms,
                  outcome.is_error, outcome.result_summary, event_id),
             )  # fmt: skip
+
+
+# --- reading the trail (dashboard) ---------------------------------------------------
+
+EVENT_FIELDS = (
+    "id", "created_at", "session_id", "upstream", "tool", "args", "decision", "rule_id",
+    "reason", "latency_ms", "upstream_ms", "overhead_ms", "is_error", "result_summary",
+    "trace_id", "span_id",
+)  # fmt: skip
+
+
+@dataclass(frozen=True)
+class AuditQuery:
+    """Filters for reading audit events, newest first. `before_id` pages to older events."""
+
+    session_id: str | None = None
+    decision: str | None = None
+    tool: str | None = None
+    limit: int = 100
+    before_id: int | None = None
+
+
+class AuditReader(Protocol):
+    async def list_events(self, query: AuditQuery) -> list[dict[str, Any]]:
+        """Events matching `query`, newest first, at most `query.limit`."""
+        ...
+
+    async def rule_counts(self) -> list[dict[str, Any]]:
+        """How often each rule blocked or escalated: [{rule_id, decision, count}], most first."""
+        ...
+
+
+def _matches(event: dict[str, Any], query: AuditQuery) -> bool:
+    if query.session_id is not None and event.get("session_id") != query.session_id:
+        return False
+    if query.decision is not None and event.get("decision") != query.decision:
+        return False
+    if query.tool is not None and event.get("tool") != query.tool:
+        return False
+    return query.before_id is None or int(event["id"]) < query.before_id
+
+
+def _sorted_counts(counts: dict[tuple[str, str], int]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for (rule_id, decision), count in counts.items():
+        rows.append({"rule_id": rule_id, "decision": decision, "count": count})
+    # Most fired first; ties by rule id so the order is stable.
+    rows.sort(key=lambda row: (-row["count"], row["rule_id"]))
+    return rows
+
+
+class MemoryAuditReader:
+    """Reads a MemoryAuditSink (tests and in-process runs)."""
+
+    def __init__(self, sink: MemoryAuditSink) -> None:
+        self.sink = sink
+
+    async def list_events(self, query: AuditQuery) -> list[dict[str, Any]]:
+        out = []
+        for event in reversed(self.sink.events):
+            if not _matches(event, query):
+                continue
+            row = {}
+            for field in EVENT_FIELDS:
+                row[field] = event.get(field)
+            out.append(row)
+            if len(out) >= query.limit:
+                break
+        return out
+
+    async def rule_counts(self) -> list[dict[str, Any]]:
+        counts: dict[tuple[str, str], int] = {}
+        for event in self.sink.events:
+            if event["decision"] == "ALLOW":
+                continue
+            key = (event["rule_id"], event["decision"])
+            counts[key] = counts.get(key, 0) + 1
+        return _sorted_counts(counts)
+
+
+SELECT_EVENTS = f"""
+select {", ".join(EVENT_FIELDS)} from audit_events
+where (%(session_id)s::text is null or session_id = %(session_id)s)
+  and (%(decision)s::text is null or decision = %(decision)s)
+  and (%(tool)s::text is null or tool = %(tool)s)
+  and (%(before_id)s::bigint is null or id < %(before_id)s)
+order by id desc
+limit %(limit)s
+"""
+
+SELECT_RULE_COUNTS = """
+select rule_id, decision, count(*) from audit_events
+where decision <> 'ALLOW'
+group by rule_id, decision
+"""
+
+
+class PostgresAuditReader:
+    """Reads `audit_events`. Async context manager owning one read connection."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self._conn: psycopg.AsyncConnection[Any] | None = None
+        self._lock = asyncio.Lock()
+
+    async def __aenter__(self) -> "PostgresAuditReader":
+        self._conn = await psycopg.AsyncConnection.connect(self.url, autocommit=True)
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+
+    def _connection(self) -> psycopg.AsyncConnection[Any]:
+        if self._conn is None:
+            raise RuntimeError("audit reader is not connected")
+        return self._conn
+
+    async def list_events(self, query: AuditQuery) -> list[dict[str, Any]]:
+        params = asdict(query)
+        async with self._lock:
+            cursor = await self._connection().execute(SELECT_EVENTS, params)
+            rows = await cursor.fetchall()
+        out = []
+        for row in rows:
+            event = dict(zip(EVENT_FIELDS, row, strict=True))
+            if isinstance(event["created_at"], datetime):
+                event["created_at"] = event["created_at"].isoformat()
+            out.append(event)
+        return out
+
+    async def rule_counts(self) -> list[dict[str, Any]]:
+        async with self._lock:
+            cursor = await self._connection().execute(SELECT_RULE_COUNTS)
+            rows = await cursor.fetchall()
+        counts: dict[tuple[str, str], int] = {}
+        for rule_id, decision, count in rows:
+            counts[(str(rule_id), str(decision))] = int(count)
+        return _sorted_counts(counts)
 
 
 def migrate(url: str) -> None:

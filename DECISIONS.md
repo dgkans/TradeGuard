@@ -375,7 +375,8 @@ Decision:
   taint and intent off), `full_guard` (gateway with `policies/default.yaml`).
 - **Runs:** a fresh in-process replay session, gateway and in-memory stores per run, with
   the real agent graph, gateway pipeline and judge. A scripted approver approves, rejects
-  (the default) or lets an approval time out (0.3 s in evals).
+  (the default) or lets an approval time out (0.3 s, only for scenarios that use the
+  timeout approver; 600 s otherwise, so a scripted decision never races the clock).
 - **Safety labels per write call:** a call matching a scenario's `must_execute` pattern is
   safe; every other write is unsafe. "Stopped" means denied, or escalated and not executed.
   A broker rejection is not counted as stopped: the guard didn't stop it.
@@ -397,3 +398,34 @@ rejections as blocks (would credit the guard for the cash account's checks).
 Consequences: temperature 0 and seed 0 make repeats close to identical on Ollama, so the
 spread over repeats mostly shows residual nondeterminism. That should be said wherever
 the numbers are quoted.
+
+## D015: Dashboard and its API (F10)
+Date: 2026-10-18
+Context: F10 needs five pages (chat, approvals, audit, policies, evals) working against the
+local stack, TypeScript strict with no `any`, and usable at phone width.
+Decision:
+- **One API process** (`services/api/`, `tradeguard api`) instead of one per concern. It
+  mounts the F6 approval routes and adds audit, policies, evals, scenarios and chat. It
+  lives outside `services/gateway` so the gateway still never imports agent code.
+- **Chat sessions** run the real agent against a gateway subprocess, exactly like the CLI.
+  Each session is one asyncio task that owns its MCP connection: the MCP stdio client must
+  be opened and closed in the same task, so requests hand it jobs over a queue. One turn
+  at a time per session (409), at most 5 sessions (429). A turn that escalates returns
+  the pending approval. `/resume` long-polls until a human decides, from the chat card or
+  the Approvals page, then finishes the turn. The checkpointer is in memory, because a
+  session's gateway subprocess dies with the API anyway.
+- **Lookups by name from a listing** (policies, eval reports, scenarios), never by a client
+  supplied path. Held out scenarios aren't offered in the chat (PLAN 7.4: don't look at
+  them). "Latest eval" prefers a recorded run over a replay of it, because replays have no
+  real timings.
+- **Frontend:** Vite, React and TypeScript strict, with `no-explicit-any` as a lint error.
+  No router library (five pages, hash routes work on any static host). No UI or chart
+  library (plain CSS with color tokens and dark mode, small SVG bar charts).
+- **Dependencies:** each pinned to the newest release that was at least 2 weeks old, then
+  `npm audit` (0 vulnerabilities). Older picks had published advisories: vitest file read
+  through the mocker, and a braces DoS through typescript-eslint. TypeScript 6.0 because
+  typescript-eslint supports < 6.1. jsdom 29 because 30 needs Node 22.22. The lockfile was
+  made with npm 11 (npm 10 crashed resolving vitest's peer set); `npm ci` with npm 10 works.
+Alternatives considered: server-sent events for chat progress (more moving parts; a turn
+is about 20 s on qwen3:8b), react-router, a chart library, CORS instead of the dev proxy.
+Consequences: chat sessions are lost when the API restarts. The API still has no auth (F12).

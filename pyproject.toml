@@ -71,6 +71,7 @@ ignore = ["SIM110"]
 # SQL here is assembled only from module constants (column lists, fixed clauses); every
 # value goes through psycopg parameters.
 "services/gateway/approvals.py" = ["S608"]
+"services/gateway/audit.py" = ["S608"]  # column names are constants; values are bound parameters
 
 [tool.mypy]
 python_version = "3.12"

@@ -1,0 +1,30 @@
+/// <reference types="vitest/config" />
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+// The dev server proxies /api to the local TradeGuard API (`tradeguard api`, port 8000),
+// so the browser talks to one origin and no CORS setup is needed.
+const apiTarget = process.env.TRADEGUARD_API ?? "http://127.0.0.1:8000";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    strictPort: true,
+    proxy: {
+      "/api": {
+        target: apiTarget,
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ""),
+        timeout: 15 * 60 * 1000, // a chat turn can wait minutes for a human approval
+        proxyTimeout: 15 * 60 * 1000,
+      },
+    },
+  },
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./src/test/setup.ts"],
+    css: false,
+  },
+});

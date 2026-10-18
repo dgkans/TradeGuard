@@ -1,4 +1,4 @@
-.PHONY: help install up down logs ps check-config test lint format typecheck check fixtures replay replay-http inspector migrate jaeger bench-gateway scenarios eval-smoke eval-smoke-replay eval-full
+.PHONY: help install up down logs ps check-config test lint format typecheck check fixtures replay replay-http inspector migrate jaeger bench-gateway scenarios eval-smoke eval-smoke-replay eval-full api dashboard-install dashboard dashboard-check
 
 help:
 	@echo "install       uv sync (Python deps + dev tools)"
@@ -20,6 +20,10 @@ help:
 	@echo "eval-smoke    10 scenario smoke eval, full_guard, live model; records tapes"
 	@echo "eval-smoke-replay  smoke eval from the committed tapes (no model needed)"
 	@echo "eval-full     all scenarios x 3 configs x 3 repeats, live model (hours)"
+	@echo "api           dashboard API on http://127.0.0.1:8000 (approvals, audit, chat, evals)"
+	@echo "dashboard-install  npm ci for the dashboard"
+	@echo "dashboard     dashboard dev server on http://127.0.0.1:5173 (needs `make api`)"
+	@echo "dashboard-check    dashboard lint + typecheck + tests + build"
 
 install:
 	uv sync
@@ -95,3 +99,15 @@ eval-smoke-replay:
 
 eval-full:
 	uv run python -m evals.runner --repeats 3 --mode record --concurrency 2
+
+api:
+	uv run tradeguard api
+
+dashboard-install:
+	cd dashboard && npm ci
+
+dashboard:
+	cd dashboard && npx vite --host 127.0.0.1
+
+dashboard-check:
+	cd dashboard && npm run check
