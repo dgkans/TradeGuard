@@ -14,3 +14,4 @@ evals/reports/run_*/tapes/
 evals/reports/full_*/tapes/
 evals/reports/full_*_replay/
 evals/reports/hard_*/tapes/
+evals/reports/attacker_*/tapes/

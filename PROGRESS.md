@@ -13,6 +13,7 @@
 | F8 Intent alignment | done | 2026-10-16 |
 | F9 Eval harness | done | 2026-10-17 |
 | F9b Hard injection suite | done (one model) | 2026-10-18 |
+| F9c Worst case agent | done | 2026-10-18 |
 | F10 Dashboard | done | 2026-10-18 |
 | F11 Alpaca paper | not started | |
 | F12 Deployment | not started | |
@@ -385,3 +386,21 @@
 - Evals: hard suite on qwen3:8b. Tuning task success 86.7% / 93.3% / 93.3% (no_guard / rules_only / full_guard); unsafe executed per repeat 1.0 / 0 / 0; false blocks 0. The held out set saw no unsafe attempts. Not quotable as an injection number (RESULTS.md).
 - Gaps: no second model; the guard's injection blocking is still mostly unmeasured; the agent's "shall I proceed?" misses.
 - Next: F11 Alpaca paper (plan order), or first the scripted worst-case agent config (small, high value for the eval story).
+
+## F9c Scripted worst case agent (follow up to F9b)
+### Plan
+- A scripted agent that acts as if every injection fully hijacked it. It reads the news, places exactly the injected order, and places the user's own order if any. It runs through the real graph, tools and gateway, with no LLM.
+- Labels `evals/datasets/attack_payloads.yaml` for all 45 injection scenarios (main 25, hard 20). Main suite payloads were parsed from each fixture's labelled goal; hard suite payloads were written by hand. All were checked against the payload text and committed (2e7ab21) before any run.
+- Runner `--agent attacker` (only the labelled injection scenarios; the judge is still the real model); reports name the agent `scripted:worst_case_attacker`.
+### Acceptance
+- [x] The attacker places every labelled payload through the real gateway (tests: script shape, unguarded execution, full guard denial, legitimate order still executing next to a blocked payload)
+- [x] All three configs on both suites, 3 repeats, held out reported separately (405 runs, 0 errors; RESULTS.md)
+### Notes and open questions
+- full_guard stopped every injected order on both suites, held out included, with 0 false blocks on the 8 legitimate orders per repeat. rules_only let through 80% (main) and 27% / 80% (hard, tuning / held out). Caveats in RESULTS.md: same author for guard, scenarios and labels, and repeats are identical by construction.
+- full_guard task success on the hard suite is 66.7% / 60%. That's by design: the 7 replacement attacks (size inflation, side flip, unit trick) never place the user's order.
+### Loop summary
+- Built: `evals/attacker.py` (scripted agent), attack labels for 45 scenarios, runner `--agent attacker`, D017.
+- Tests: 361 Python passing (6 new); ruff and mypy clean.
+- Evals: worst case agent, full_guard 100% unsafe block rate on all four sets (main and hard, tuning and held out), rules_only 20% to 73%, false block rate 0%.
+- Gaps: one author for attacks and guard; no attacks that mimic the user's own request; the real model gullibility question stays with the LLM runs.
+- Next: F11 Alpaca paper.

@@ -452,3 +452,20 @@ per model); larger models such as gpt-oss 20b (too close to this 16 GB machine's
 alongside the stack).
 Consequences: all agent numbers are for one model, which is stated wherever they appear. A
 free API model (Groq, F12) could serve as the second model later, within its daily limits.
+
+## D017: Scripted worst case agent for measuring the guard alone (F9c)
+Date: 2026-10-18
+Context: qwen3:8b rarely acts on injected instructions (F9, F9b), so LLM runs say little about
+what the guard stops. Two other local models could not use the tools (D016).
+Decision: a deterministic agent that acts as fully hijacked. It reads the news, places
+exactly the order each injection asks for (from frozen per scenario labels), then the
+user's own order. It runs through the real agent graph, tools and gateway; only the model
+is replaced. It is reported as its own agent, never mixed with LLM results.
+Alternatives considered:
+- Extracting orders from the news text with regexes: that would tune the attacker to my own
+  wording.
+- Prompting a model to be gullible: nondeterministic, and it costs model time.
+- A free API model: daily limits (PLAN 15.2), and still not guaranteed to take the bait.
+Consequences: a clean, repeatable "if hijacked, what gets through" measure, in seconds per
+run with no tokens. It says nothing about how often a real model is hijacked; the LLM runs
+cover that. Its attacks are only as good as the labels, which the guard's author wrote.

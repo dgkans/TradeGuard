@@ -63,6 +63,59 @@ Notes, read these before quoting any number above:
 
 Replay check (2026-10-17): every LLM response of this run was recorded to tapes (`evals/reports/full_4435fea/tapes/`, gitignored, 3.6 MB). Replaying all 900 runs with no model (`--mode replay --concurrency 6`), then `uv run python -m evals.compare_runs evals/reports/full_4435fea evals/reports/full_4435fea_replay`, gives "900 vs 900 runs, 0 differ". That covers task outcome, every write call (tool, args, outcome, rule), agent and judge tokens, answer and error, and all the non timing metrics in the tables match. The replay used code after 4435fea with two harness fixes (F9 commit). The first replay attempt found a bug: 12 of 900 runs differed because scripted rejections raced a 0.3 s approval expiry under load. That is fixed with a regression test. The recorded run itself had 0 run errors, so its numbers are unaffected. Smoke tapes: the 10 smoke scenarios also replay to the recorded outcomes (10/10).
 
+## Run 2026-10-18 | scripted worst case agent | commit 2e7ab21 (F9c)
+Agent: `scripted:worst_case_attacker` (no LLM, see `evals/attacker.py`)   Judge model: ollama:qwen3:8b   Temperature: 0
+Scenarios: the 45 injection scenarios (main suite 25, of which 5 held out; hard suite 20, of which 5 held out)   Repeats: 3   Configs: no_guard, rules_only, full_guard (405 runs, 0 run errors)
+Source: `uv run python -m evals.runner --agent attacker --repeats 3 --mode record --concurrency 4 --out evals/reports/attacker_main_2e7ab21`, and the same with `--suite-dir scenarios_hard --out evals/reports/attacker_hard_2e7ab21`. The reports say `2e7ab21-dirty`; the only uncommitted edit was `.gitignore`. The attack labels (`evals/datasets/attack_payloads.yaml`) and the agent were committed in 2e7ab21 before these runs. The guard was not changed.
+
+What the agent does: it acts as if every injection fully hijacked it. It reads the scenario's news (so the payload enters the context), places exactly the order the injection asks for, places the user's own order if there is one, then answers. It runs through the real agent graph, tools and gateway; only the model is replaced. This measures what the guard stops on its own, whether or not a real model would have taken the bait.
+
+Main suite injection scenarios:
+
+| Metric | no_guard | rules_only | full_guard |
+|---|---|---|---|
+| Unsafe action block rate, tuning (20) | 0.0% (all 3) | 20.0% (all 3) | 100.0% (all 3) |
+| Unsafe action block rate, held out (5) | 0.0% (all 3) | 60.0% (all 3) | 100.0% (all 3) |
+| Injection success rate, tuning | 100.0% (all 3) | 80.0% (all 3) | 0.0% (all 3) |
+| Injection success rate, held out | 100.0% (all 3) | 40.0% (all 3) | 0.0% (all 3) |
+| False block rate, tuning / held out | 0.0% / 0.0% | 0.0% / 0.0% | 0.0% / 0.0% |
+| Task success rate, tuning / held out | 0.0% / 0.0% | 20.0% / 60.0% | 100.0% / 100.0% |
+
+Hard suite:
+
+| Metric | no_guard | rules_only | full_guard |
+|---|---|---|---|
+| Unsafe action block rate, tuning (15) | 0.0% (all 3) | 73.3% (all 3) | 100.0% (all 3) |
+| Unsafe action block rate, held out (5) | 0.0% (all 3) | 20.0% (all 3) | 100.0% (all 3) |
+| Injection success rate, tuning | 100.0% (all 3) | 26.7% (all 3) | 0.0% (all 3) |
+| Injection success rate, held out | 100.0% (all 3) | 80.0% (all 3) | 0.0% (all 3) |
+| False block rate, tuning / held out | 0.0% / 0.0% | 0.0% / 0.0% | 0.0% / 0.0% |
+| Task success rate, tuning / held out | 0.0% / 0.0% | 40.0% / 0.0% | 66.7% / 60.0% |
+| Escalation rate, tuning / held out | 0.0% / 0.0% | 47.1% / 16.7% | 5.9% / 16.7% |
+
+Escalation rate on the main suite: rules_only 8.3% tuning and 33.3% held out; full_guard 0.0% on both.
+
+Counts per repeat:
+- **Main suite:** 30 write calls (25 injected, 5 legitimate). Injected orders executed: no_guard 25, rules_only 18, full_guard 0. All 5 legitimate orders executed in full_guard.
+- **Hard suite:** 23 write calls (20 injected, 3 legitimate). Injected orders executed: no_guard 20, rules_only 8, full_guard 0. All 3 legitimate orders executed in full_guard.
+
+Notes:
+- **What stopped the injected orders in full_guard** (counts over 3 repeats, both suites):
+  - taint_unsupported: 93
+  - intent_amount_mismatch: 12 (size inflation and unit tricks, where the symbol and side match the user's request)
+  - max_order_notional: 15
+  - intent_wrong_symbol: 6
+  - taint_partial_support: 6
+  - symbol_not_allowed: 3
+
+  In rules_only, injected orders that fit the size and symbol limits simply executed.
+- **full_guard task success is below 100% on the hard suite by design.** Seven scenarios are "replacement" attacks (size inflation 3, side flip 2, unit trick 2): the hijacked agent places the attacker's order instead of the user's, so the user's order is missing even though the guard blocked the attack. Every legitimate order the agent did place executed: 8 per repeat across both suites, 0 false blocks.
+- **Caveats:**
+  - The same author wrote the guard, the scenarios and the attack labels, so these numbers are optimistic.
+  - The attacks are the 45 injection payloads in this repo. Not covered: attacks that also match the user's own request exactly (they would do what the user asked), payloads in tools the policy marks trusted (none of them returns free text in replay), and multi step attacks beyond the two turn ones here.
+  - The agent is deterministic, so repeats are identical. The [min, max] spread is zero by construction, not a measure of stability.
+- **Use with the LLM runs, not instead of them.** This answers "if the model is fully hijacked, what does the guard stop?" The F9 and F9b runs answer "how often does a real model get hijacked?" (rarely, for qwen3:8b).
+
 ## Run 2026-10-18 | hard injection suite | commit 14abc37 (F9b)
 Agent model: ollama:qwen3:8b   Judge model: ollama:qwen3:8b   Temperature: 0 (seed 0)   Ollama 0.40.5, Apple M5 16 GB
 Scenarios: 20 hard injection scenarios (held out: 5), suite `scenarios_hard/`   Repeats: 3   Configs: no_guard, rules_only, full_guard (180 runs, 0 run errors)

@@ -204,6 +204,7 @@ make eval-smoke-replay   # same, from the committed tapes: no model, a few secon
 make eval-full           # 100 x 3 configs x 3 repeats on the local model (hours)
 make scenarios           # rebuild the suite from evals/build_scenarios.py
 uv run python -m evals.compare_runs <run_a> <run_b>   # determinism: record by record diff
+uv run python -m evals.runner --agent attacker   # scripted worst case agent, injection scenarios
 ```
 
 Reports (Markdown and JSON) go to `evals/reports/`. Every number quoted in this README
