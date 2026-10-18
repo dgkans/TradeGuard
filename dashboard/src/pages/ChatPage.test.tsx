@@ -95,4 +95,19 @@ describe("ChatPage", () => {
     expect(await screen.findByText("Bought $1,500 of NVDA.")).toBeInTheDocument();
     expect(screen.getByText(/executed/)).toBeInTheDocument();
   });
+
+  it("forces the guard and hides the clock buttons for an Alpaca paper session", async () => {
+    const paper: Scenario = { id: "alpaca_paper", category: "paper",
+                              description: "Your Alpaca PAPER account", watchlist: ["NVDA"],
+                              start_time: "now", path: "" };
+    const createSession = vi.fn(async () => ({ ...info, scenario: "alpaca_paper" }));
+    renderWith(fakeApi({ scenarios: vi.fn(async () => [paper, ...scenarios]), createSession }));
+    await userEvent.selectOptions(await screen.findByLabelText(/scenario/i), "alpaca_paper");
+    expect(screen.getByLabelText(/no guard/i)).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /start session/i }));
+    expect(createSession).toHaveBeenCalledWith("alpaca_paper", true, "default");
+    expect(await screen.findByText(/paper account/i, { selector: ".session-mode" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /\+5 min/ })).not.toBeInTheDocument();
+  });
 });

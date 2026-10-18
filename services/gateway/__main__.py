@@ -1,6 +1,8 @@
-"""Run the gateway for one agent session over stdio, in front of the replay server.
+"""Run the gateway for one agent session over stdio, in front of the replay server or an
+Alpaca paper account.
 
     uv run python -m services.gateway --session s1 --scenario demo
+    uv run python -m services.gateway --session s1 --upstream alpaca     # TRADING_MODE=paper
 
 Audit events go to Postgres (DATABASE_URL). `--audit memory` is for tests only. Overhead
 p50 and p95 are logged to stderr on exit.
@@ -17,6 +19,7 @@ from pathlib import Path
 from mcp.client.stdio import StdioServerParameters
 from mcp.server.stdio import stdio_server
 
+from services.alpaca_adapter.adapter import alpaca_server_params, connect_adapter
 from services.common.config import ConfigError, child_env, load_settings
 from services.common.llm import make_chat_model
 from services.common.telemetry import setup_tracing
@@ -45,17 +48,24 @@ async def serve(args: argparse.Namespace) -> int:
     if policy is not None and policy.intent.enabled and policy.intent.judge.enabled:
         chat = make_chat_model(settings, json_mode=True, model=settings.judge_model)
         judge = LlmJudge(chat, model=f"{settings.llm_provider}:{settings.judge_model}")
-    replay_args = ["-m", "services.replay_server", "--scenario", args.scenario]
-    if args.dev_tools:
-        replay_args.append("--dev-tools")
-    upstream = Upstream(
-        name="replay",
-        target=StdioServerParameters(
-            command=sys.executable, args=replay_args, cwd=Path.cwd(), env=child_env()
-        ),
-    )
     try:
         async with AsyncExitStack() as stack:
+            if args.upstream == "alpaca":
+                # Paper only: refuses unless TRADING_MODE=paper, keys set, and the account is a
+                # paper account (services/alpaca_adapter/adapter.py).
+                params = alpaca_server_params(settings)
+                adapter = await stack.enter_async_context(connect_adapter(params))
+                upstream = Upstream(name="alpaca", target=adapter)
+            else:
+                replay_args = ["-m", "services.replay_server", "--scenario", args.scenario]
+                if args.dev_tools:
+                    replay_args.append("--dev-tools")
+                upstream = Upstream(
+                    name="replay",
+                    target=StdioServerParameters(
+                        command=sys.executable, args=replay_args, cwd=Path.cwd(), env=child_env()
+                    ),
+                )
             audit: AuditSink
             approvals: ApprovalStore
             provenance: ProvenanceStore
@@ -84,8 +94,9 @@ async def serve(args: argparse.Namespace) -> int:
                 )
             )
             policy_name = policy.name if policy else "none (pass through)"
-            print(f"gateway: session={args.session} upstreams=replay tools={len(gateway.tools)} "
-                  f"audit={args.audit} policy={policy_name}", file=sys.stderr)  # fmt: skip
+            print(f"gateway: session={args.session} upstreams={upstream.name} "
+                  f"tools={len(gateway.tools)} audit={args.audit} policy={policy_name}",
+                  file=sys.stderr)  # fmt: skip
             try:
                 async with stdio_server() as (read_stream, write_stream):
                     await gateway.server.run(
@@ -104,6 +115,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="gateway", description="TradeGuard gateway (stdio)")
     parser.add_argument("--session", required=True, help="agent session id, used in the audit log")
     parser.add_argument("--scenario", default="demo")
+    parser.add_argument(
+        "--upstream",
+        choices=["replay", "alpaca"],
+        default="replay",
+        help="replay (simulated) or alpaca (paper account; needs TRADING_MODE=paper and keys)",
+    )
     parser.add_argument("--audit", choices=["postgres", "memory"], default="postgres")
     parser.add_argument("--dev-tools", action="store_true", help="expose advance_clock upstream")
     parser.add_argument(

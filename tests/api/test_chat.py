@@ -219,3 +219,47 @@ async def test_advance_clock_bounds(minutes: int) -> None:
     assert response.status_code == 422
     assert ok.status_code == 200
     assert "now" in ok.json()["clock"]
+
+
+# --- Alpaca paper sessions (F11) ---------------------------------------------------------
+
+
+def paper_service(watchlist: list[str] | None) -> ChatService:
+    async_none: Any = None
+    return ChatService(connect=async_none, models=async_none, approval_timeout_s=60,
+                       repo_root=REPO_ROOT, paper_watchlist=watchlist)  # fmt: skip
+
+
+async def test_paper_session_is_offered_only_when_paper_mode_is_configured() -> None:
+    from services.api.app import ApiDeps, create_app
+
+    for watchlist, offered in ((None, False), (["NVDA", "AMD"], True)):
+        deps = ApiDeps(approvals=MemoryApprovalStore(audit=MemoryAuditSink()),
+                       audit=MemoryAuditReader(MemoryAuditSink()), chat=paper_service(watchlist),
+                       repo_root=REPO_ROOT)  # fmt: skip
+        transport = httpx.ASGITransport(app=create_app(deps))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            ids = [s["id"] for s in (await client.get("/scenarios")).json()["scenarios"]]
+            if not offered:
+                missing = await client.post("/chat/sessions", json={"scenario": "alpaca_paper"})
+                assert missing.status_code == 404
+        assert ("alpaca_paper" in ids) is offered
+        if offered:
+            assert ids[0] == "alpaca_paper"
+
+
+async def test_paper_session_must_go_through_the_gateway() -> None:
+    service = paper_service(["NVDA"])
+    with pytest.raises(Exception, match="gateway"):
+        await service.create("alpaca_paper", guarded=False, policy="default")
+
+
+async def test_paper_connector_starts_the_gateway_on_the_alpaca_upstream() -> None:
+    from services.api.chat import stdio_connector
+
+    spec = ChatSpec("alpaca_paper", True, "default", REPO_ROOT / "policies/default.yaml")
+    async with stdio_connector(REPO_ROOT)(spec, "web-alpaca_paper-1", "tok") as params:
+        args = list(params.args)
+    assert args[:2] == ["-m", "services.gateway"]
+    assert args[args.index("--upstream") + 1] == "alpaca"
+    assert "--scenario" not in args and "--dev-tools" not in args

@@ -13,6 +13,7 @@ import type {
 } from "../types";
 
 const SESSION_KEY = "tradeguard.chat.session";
+const PAPER = "alpaca_paper"; // a real paper account: always guarded, real clock
 
 function rememberSession(id: string | null) {
   try {
@@ -120,6 +121,13 @@ export function ChatPage() {
   }, [transcript, pending]);
 
   const selected = scenarios.find((item) => item.id === scenario);
+  const paperSelected = scenario === PAPER;
+  const paperSession = session?.scenario === PAPER;
+
+  function chooseScenario(id: string) {
+    setScenario(id);
+    if (id === PAPER) setGuarded(true);
+  }
 
   async function start() {
     setError(null);
@@ -216,7 +224,7 @@ export function ChatPage() {
         <form className="card setup" onSubmit={(event) => { event.preventDefault(); void start(); }}>
           <label htmlFor={ids.scenario} className="field-label">Scenario</label>
           <select id={ids.scenario} className="input" value={scenario}
-                  onChange={(event) => setScenario(event.target.value)}>
+                  onChange={(event) => chooseScenario(event.target.value)}>
             {scenarios.length === 0 ? <option value="demo">demo</option> : null}
             {scenarios.map((item) => (
               <option key={item.id} value={item.id}>
@@ -237,9 +245,9 @@ export function ChatPage() {
               Guarded (through the gateway)
             </label>
             <label>
-              <input type="radio" name="mode" checked={!guarded}
+              <input type="radio" name="mode" checked={!guarded} disabled={paperSelected}
                      onChange={() => setGuarded(false)} />{" "}
-              No guard (direct, the baseline)
+              No guard (direct, the baseline){paperSelected ? " · not for a real account" : ""}
             </label>
           </fieldset>
           {guarded ? (
@@ -263,15 +271,20 @@ export function ChatPage() {
             <span>
               <code>{session.scenario}</code>{" "}
               <span className="session-mode">
+                {paperSession ? "Alpaca paper account · " : ""}
                 {session.guarded ? `Guarded · ${session.policy}` : "No guard"}
               </span>{" "}
               <span className="muted small">{session.model}</span>
             </span>
             <span className="actions">
-              <button type="button" className="button button-quiet" disabled={working}
-                      onClick={() => void advance(5)}>+5 min</button>
-              <button type="button" className="button button-quiet" disabled={working}
-                      onClick={() => void advance(60)}>+1 hour</button>
+              {paperSession ? null : (
+                <>
+                  <button type="button" className="button button-quiet" disabled={working}
+                          onClick={() => void advance(5)}>+5 min</button>
+                  <button type="button" className="button button-quiet" disabled={working}
+                          onClick={() => void advance(60)}>+1 hour</button>
+                </>
+              )}
               <button type="button" className="button button-quiet" onClick={() => void end()}>
                 End session
               </button>

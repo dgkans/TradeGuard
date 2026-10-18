@@ -4,6 +4,7 @@
     uv run tradeguard chat --scenario demo --session my-session      # resume later
     uv run tradeguard chat --scenario demo --once "What is NVDA at?"
     uv run tradeguard chat --scenario demo --direct     # no gateway (no_guard baseline)
+    uv run tradeguard chat --broker alpaca              # Alpaca PAPER account (TRADING_MODE=paper)
     uv run tradeguard gateway-stats --session my-session
 
 In chat, `/advance N` moves the simulated clock N minutes (the agent itself cannot),
@@ -36,6 +37,14 @@ from services.replay_server.scenario import ScenarioError, load_scenario
 RUNS_DIR = Path("runs")
 
 
+def paper_watchlist(settings: Settings) -> list[str]:
+    symbols = []
+    for part in settings.paper_watchlist.split(","):
+        if part.strip():
+            symbols.append(part.strip().upper())
+    return symbols
+
+
 def echo_tool_call(record: dict[str, Any]) -> None:
     status = "error: " + str(record["error"]) if record["error"] else "ok"
     args = json.dumps(record["args"])
@@ -43,12 +52,26 @@ def echo_tool_call(record: dict[str, Any]) -> None:
 
 
 async def chat(args: argparse.Namespace, settings: Settings) -> int:
-    scenario = load_scenario(args.scenario)
-    session_id = args.session or f"{scenario.id}-{uuid.uuid4().hex[:8]}"
+    paper = args.broker == "alpaca"
+    if paper and args.direct:
+        print("tradeguard: --direct is not allowed with --broker alpaca (a real paper account "
+              "always goes through the gateway)", file=sys.stderr)  # fmt: skip
+        return 2
+    if paper:
+        scenario_id = "alpaca_paper"
+        watchlist = paper_watchlist(settings)
+    else:
+        scenario = load_scenario(args.scenario)
+        scenario_id = scenario.id
+        watchlist = scenario.watchlist
+    session_id = args.session or f"{scenario_id}-{uuid.uuid4().hex[:8]}"
     log = ToolCallLog(path=RUNS_DIR / f"{session_id}.jsonl", thread_id=session_id,
                       echo=echo_tool_call)  # fmt: skip
     operator_token = secrets.token_urlsafe(24)
-    if args.direct:
+    if paper:
+        server_args = ["-m", "services.gateway", "--session", session_id, "--upstream",
+                       "alpaca", "--policy", args.policy]  # fmt: skip
+    elif args.direct:
         server_args = ["-m", "services.replay_server", "--scenario", args.scenario, "--dev-tools"]
     else:
         server_args = ["-m", "services.gateway", "--session", session_id, "--scenario",
@@ -58,7 +81,7 @@ async def chat(args: argparse.Namespace, settings: Settings) -> int:
         command=sys.executable, args=server_args, cwd=Path.cwd(), env=env
     )
     operator_meta = {OPERATOR_META_KEY: operator_token}
-    context = AgentContext(scenario_id=scenario.id, watchlist=scenario.watchlist)
+    context = AgentContext(scenario_id=scenario_id, watchlist=watchlist)
     chat_model = make_chat_model(settings)
     json_model = make_chat_model(settings, json_mode=True)
     url = settings.database_url.get_secret_value()
@@ -69,8 +92,9 @@ async def chat(args: argparse.Namespace, settings: Settings) -> int:
             graph = build_graph(chat_model, json_model, toolset.tools, context=context,
                                 checkpointer=saver, max_tool_calls=args.max_tool_calls)  # fmt: skip
             route = "direct (no guard)" if args.direct else f"via gateway, policy {args.policy}"
+            mode = "ALPACA PAPER account" if paper else "replay"
             model = f"{settings.llm_provider}:{settings.llm_model}"
-            print(f"session {session_id} | scenario {scenario.id} | model {model} | {route} "
+            print(f"session {session_id} | {mode} {scenario_id} | model {model} | {route} "
                   "| paper/replay only")  # fmt: skip
             print(f"tool log: {log.path}")
             turn = Turn(graph, toolset, session_id, operator_meta, settings,
@@ -150,8 +174,11 @@ async def repl(turn: "Turn") -> int:
         if text.startswith("/advance"):
             parts = text.split()
             minutes = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
-            print(await turn.toolset.call("advance_clock", {"minutes": minutes},
-                                          turn.operator_meta))  # fmt: skip
+            try:
+                print(await turn.toolset.call("advance_clock", {"minutes": minutes},
+                                              turn.operator_meta))  # fmt: skip
+            except RuntimeError as exc:  # paper sessions run on the real clock
+                print(f"cannot move the clock here: {exc}")
             continue
         await turn.send(text)
 
@@ -200,6 +227,12 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     chat_cmd = commands.add_parser("chat", help="chat with the baseline agent")
     chat_cmd.add_argument("--scenario", default="demo")
+    chat_cmd.add_argument(
+        "--broker",
+        choices=["replay", "alpaca"],
+        default="replay",
+        help="alpaca: your Alpaca PAPER account (TRADING_MODE=paper and keys in .env)",
+    )
     chat_cmd.add_argument("--session", help="session id to create or resume")
     chat_cmd.add_argument("--once", help="send one message and exit")
     chat_cmd.add_argument("--max-tool-calls", type=int, default=20)

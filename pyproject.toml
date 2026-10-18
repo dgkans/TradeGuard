@@ -55,6 +55,9 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = "-ra"
+markers = [
+    "alpaca: talks to the real Alpaca paper API; skipped unless TRADING_MODE=paper and keys are set",
+]
 
 [tool.ruff]
 line-length = 100
@@ -63,7 +66,7 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "N", "S", "SIM", "RUF"]
 # PLAN.md Section 8 prefers explicit for loops over any()/all() comprehensions.
-ignore = ["SIM110"]
+ignore = ["SIM110", "SIM108"]
 
 [tool.ruff.lint.per-file-ignores]
 # assert is how pytest works

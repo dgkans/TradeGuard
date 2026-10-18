@@ -15,7 +15,7 @@
 | F9b Hard injection suite | done (one model) | 2026-10-18 |
 | F9c Worst case agent | done | 2026-10-18 |
 | F10 Dashboard | done | 2026-10-18 |
-| F11 Alpaca paper | not started | |
+| F11 Alpaca paper | in progress | |
 | F12 Deployment | not started | |
 | F13 Impact and beta | not started | |
 | F14 Ship it | not started | |
@@ -404,3 +404,35 @@
 - Evals: worst case agent, full_guard 100% unsafe block rate on all four sets (main and hard, tuning and held out), rules_only 20% to 73%, false block rate 0%.
 - Gaps: one author for attacks and guard; no attacks that mimic the user's own request; the real model gullibility question stays with the LLM runs.
 - Next: F11 Alpaca paper.
+
+## Current feature: F11 Alpaca paper integration
+### Plan
+- **Upstream:** Alpaca's official MCP server, `alpaca-mcp-server==2.3.2` (published 2026-09-16; wheel sha256 checked against PyPI and source read before use). It runs through `uvx` in its own environment because it pins fastmcp 3.4.7, which would conflict with our MCP SDK.
+- **Adapter** `services/alpaca_adapter`: our MCP server, run as the gateway's upstream when `TRADING_MODE=paper`. It exposes the replay server's tools with the same names, arguments and output shapes:
+  - `get_clock`, `get_quote`, `get_bars`, `get_news`, `get_account`, `get_positions`, `list_orders`, `place_order`, `cancel_order`.
+  - Each one translates to the Alpaca tool and unwraps Alpaca's trust envelope.
+  - Alpaca's nanosecond timestamps become ISO 8601 microseconds, and its string numbers become floats.
+  - Account ids are masked (PLAN 8.6).
+  - Pattern tools aren't offered in paper mode (a gap).
+  So policies, taint labels, intent checks, approvals, audit and the dashboard apply unchanged ("map tool names so the same policies apply").
+- **Paper only, enforced four ways (fail closed):**
+  1. The existing config check refuses live settings.
+  2. The adapter refuses to start unless `TRADING_MODE=paper` and both keys are set.
+  3. The official server's environment is built from scratch with `ALPACA_PAPER_TRADE=true` hard-coded (that server treats anything else as live). Only the two keys and the toolset list are passed; nothing else is inherited.
+  4. At startup the adapter reads the account and refuses unless it is a paper account (account number starts with `PA`).
+- **Alpaca toolsets:** only account, trading, assets, stock-data and news are enabled. The adapter exposes nothing else (no options, crypto or account config changes).
+- **Gateway and CLI:** `--upstream alpaca` (gateway) and `--broker alpaca` (`tradeguard chat`). The dashboard offers an "alpaca_paper" session when paper mode is configured.
+- **Tests:**
+  - A fake Alpaca MCP server returns documented Alpaca response shapes, for adapter translation and for gateway behavior (the same denials and approvals as replay).
+  - Live mode refusal tests.
+  - `@pytest.mark.alpaca` integration test against the real paper API, skipped without keys: place a far-from-market limit order through the gateway, list it, cancel it.
+### Acceptance
+- [ ] Guarded agent places, lists and cancels a paper order through the gateway. **Pending keys.** Done against an in-process stand-in that speaks the official server's tool names, argument names, response shapes and trust envelope (`tests/alpaca/`). The real API test (`pytest -m alpaca`) and a `tradeguard chat --broker alpaca` run need the user's paper keys.
+- [x] Policy denials and approvals behave the same as in replay. Same rule ids through the gateway over the adapter: max_order_notional, approval_notional (executed exactly once after approval), market_hours, taint_unsupported after reading news.
+- [x] Live mode impossible to configure (tested). The gateway subprocess refuses all 6 cases: no paper mode, no keys, ALPACA_PAPER=false, live base URL, TRADING_MODE=live, LIVE_TRADING=true. The child environment always forces ALPACA_PAPER_TRADE=true even if the shell says false. A non paper account is refused, and so are bad keys (verified against the real API with dummy keys: clean refusal, exit 2).
+### Notes and open questions
+- **Blocking acceptance 1:** needs the user's free Alpaca paper API keys in `.env` (no card, no funding) plus `TRADING_MODE=paper`.
+- Bug found and fixed with a regression test: a 401 while verifying the account escaped as an ExceptionGroup traceback. It now refuses cleanly.
+- Lint: SIM108 is ignored like SIM110 (PLAN 8 prefers explicit if/else).
+### Loop summary
+-

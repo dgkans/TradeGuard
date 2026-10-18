@@ -33,6 +33,7 @@ from services.gateway.mcp_proxy.proxy import OPERATOR_META_KEY, OPERATOR_TOKEN_E
 
 logger = logging.getLogger(__name__)
 PREVIEW_CHARS = 400
+PAPER_SCENARIO = "alpaca_paper"
 
 
 class ChatError(Exception):
@@ -109,7 +110,7 @@ class ChatSession:
             raise ChatStartError(f"could not start the session: {exc}") from exc
 
     async def _work(self, ready: "asyncio.Future[None]") -> None:
-        scenario = catalog.find_scenario(self.service.repo_root, self.spec.scenario) or {}
+        scenario = self.service.find_scenario(self.spec.scenario) or {}
         context = AgentContext(self.spec.scenario, list(scenario.get("watchlist", [])))
         try:
             connect = self.service.connect(self.spec, self.session_id, self._operator_token)
@@ -299,6 +300,7 @@ class ChatService:
         max_tool_calls: int = 20,
         poll_seconds: float = 0.5,
         model_name: str = "",
+        paper_watchlist: list[str] | None = None,
     ) -> None:
         self.connect = connect
         self.models = models
@@ -308,12 +310,33 @@ class ChatService:
         self.max_tool_calls = max_tool_calls
         self.poll_seconds = poll_seconds
         self.model_name = model_name
+        self.paper_watchlist = paper_watchlist
         self.sessions: dict[str, ChatSession] = {}
+
+    def paper_entry(self) -> dict[str, Any] | None:
+        """The Alpaca paper "scenario", offered only when paper mode is configured."""
+        if not self.paper_watchlist:
+            return None
+        return {
+            "id": PAPER_SCENARIO,
+            "category": "paper",
+            "description": "Your Alpaca PAPER account: live market data, paper money",
+            "watchlist": list(self.paper_watchlist),
+            "start_time": "now",
+            "path": "",
+        }
+
+    def find_scenario(self, scenario_id: str) -> dict[str, Any] | None:
+        if scenario_id == PAPER_SCENARIO:
+            return self.paper_entry()
+        return catalog.find_scenario(self.repo_root, scenario_id)
 
     async def create(self, scenario: str, guarded: bool, policy: str) -> ChatSession:
         """Start a session. Raises ChatNotFoundError (scenario or policy), TooManySessions."""
-        if catalog.find_scenario(self.repo_root, scenario) is None:
+        if self.find_scenario(scenario) is None:
             raise ChatNotFoundError(f"no scenario {scenario!r} (held out ones are not offered)")
+        if scenario == PAPER_SCENARIO and not guarded:
+            raise ChatError("a paper account session always goes through the gateway")
         path = catalog.policy_path(self.repo_root, policy)
         if path is None:
             raise ChatNotFoundError(f"no policy {policy!r}")
@@ -346,7 +369,12 @@ def stdio_connector(repo_root: Path) -> Connector:
 
     @asynccontextmanager
     async def connect(spec: ChatSpec, session_id: str, token: str) -> AsyncIterator[Any]:
-        if spec.guarded:
+        if spec.scenario == PAPER_SCENARIO:
+            if not spec.guarded:
+                raise ChatError("a paper account session always goes through the gateway")
+            args = ["-m", "services.gateway", "--session", session_id, "--upstream", "alpaca",
+                    "--policy", str(spec.policy_path)]  # fmt: skip
+        elif spec.guarded:
             args = ["-m", "services.gateway", "--session", session_id, "--scenario",
                     spec.scenario, "--dev-tools", "--policy", str(spec.policy_path)]  # fmt: skip
         else:

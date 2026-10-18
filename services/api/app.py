@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from services.alpaca_adapter.adapter import PaperModeError, require_paper_settings
 from services.api import catalog
 from services.api.chat import ChatError, ChatService, settings_models, stdio_connector
 from services.common.config import Settings
@@ -64,7 +65,7 @@ def create_app(deps: ApiDeps) -> FastAPI:
 
     add_approval_routes(app, deps.approvals)
     add_audit_routes(app, deps)
-    add_catalog_routes(app, deps.repo_root)
+    add_catalog_routes(app, deps.repo_root, deps.chat)
     add_chat_routes(app, deps)
     return app
 
@@ -99,7 +100,7 @@ def add_audit_routes(app: FastAPI, deps: ApiDeps) -> None:
         return {"rules": await deps.audit.rule_counts()}
 
 
-def add_catalog_routes(app: FastAPI, root: Path) -> None:
+def add_catalog_routes(app: FastAPI, root: Path, chat: ChatService | None = None) -> None:
     @app.get("/policies")
     async def policies() -> dict[str, Any]:
         return {"policies": catalog.list_policies(root)}
@@ -134,7 +135,11 @@ def add_catalog_routes(app: FastAPI, root: Path) -> None:
 
     @app.get("/scenarios")
     async def scenarios() -> dict[str, Any]:
-        return {"scenarios": list(catalog.list_scenarios(root))}
+        offered = list(catalog.list_scenarios(root))
+        paper = chat.paper_entry() if chat is not None else None
+        if paper is not None:
+            offered.insert(0, paper)
+        return {"scenarios": offered}
 
 
 def add_chat_routes(app: FastAPI, deps: ApiDeps) -> None:
@@ -187,6 +192,19 @@ class _Late:
         return getattr(self._holder[self._key], name)
 
 
+def paper_watchlist(settings: Settings) -> list[str] | None:
+    """The watchlist for paper sessions, or None when paper mode isn't fully configured."""
+    try:
+        require_paper_settings(settings)
+    except PaperModeError:
+        return None
+    symbols = []
+    for part in settings.paper_watchlist.split(","):
+        if part.strip():
+            symbols.append(part.strip().upper())
+    return symbols
+
+
 def create_postgres_app(settings: Settings) -> FastAPI:
     """The API against DATABASE_URL, with real chat sessions (gateway subprocesses)."""
     url = settings.database_url.get_secret_value()
@@ -197,6 +215,7 @@ def create_postgres_app(settings: Settings) -> FastAPI:
         approval_timeout_s=settings.approval_timeout_seconds,
         repo_root=REPO_ROOT,
         model_name=f"{settings.llm_provider}:{settings.llm_model}",
+        paper_watchlist=paper_watchlist(settings),
     )
     deps = ApiDeps(
         approvals=_Late(holder, "approvals"),

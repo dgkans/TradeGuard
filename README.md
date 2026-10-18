@@ -250,3 +250,34 @@ Start Postgres, Ollama, `make jaeger`, `make api` and `make dashboard`. Then:
 5. **Policies and Evals (15 s).** The default policy YAML and which rules fired most. Then
    the full eval: tuning and held out tables for no_guard, rules_only and full_guard, with
    charts. The caveats live in [RESULTS.md](RESULTS.md); read them before quoting a number.
+
+## Alpaca paper trading (F11)
+
+The same guard in front of a real broker API, **paper only**. TradeGuard runs Alpaca's
+official MCP server (`alpaca-mcp-server==2.3.2`, via `uvx`) behind an adapter that exposes
+the replay server's tools. Every policy, taint label, intent check, approval and audit row
+applies unchanged.
+
+1. Create a free Alpaca **paper** account (no card, no funding) and generate paper API keys.
+2. In `.env`: `TRADING_MODE=paper`, `ALPACA_API_KEY=...`, `ALPACA_SECRET_KEY=...`
+   (`ALPACA_PAPER=true` and the paper `ALPACA_BASE_URL` are the defaults).
+3. Run:
+
+```bash
+uv run tradeguard chat --broker alpaca      # guarded agent on your paper account
+uv run pytest -m alpaca -v                  # real paper API: place, list, cancel a $1 limit order
+```
+
+The dashboard offers an `alpaca_paper` chat session when paper mode is configured.
+
+How live trading stays impossible, each layer failing closed:
+1. Live settings (`LIVE_TRADING`, `TRADING_MODE=live`, `ALPACA_PAPER=false`, a non paper
+   `ALPACA_BASE_URL`) never load.
+2. The Alpaca upstream needs `TRADING_MODE=paper` and both keys.
+3. The official server is started with an environment built from scratch: two keys,
+   `ALPACA_PAPER_TRADE=true` and a narrow toolset list. Nothing is inherited from your shell.
+4. On connect, the account must be a paper account. If it can't be verified (bad keys,
+   network), the gateway doesn't start.
+
+There is no direct (unguarded) mode against Alpaca. Pattern tools and the simulated clock
+are replay only.

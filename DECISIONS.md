@@ -469,3 +469,31 @@ Alternatives considered:
 Consequences: a clean, repeatable "if hijacked, what gets through" measure, in seconds per
 run with no tokens. It says nothing about how often a real model is hijacked; the LLM runs
 cover that. Its attacks are only as good as the labels, which the guard's author wrote.
+
+## D018: Alpaca paper through an adapter with the replay tool contract (F11)
+Date: 2026-10-18
+Context: F11 needs Alpaca's official MCP server behind the gateway, with the same policies as
+replay and live trading impossible.
+Decision:
+- **Pinned official server:** `alpaca-mcp-server==2.3.2`. Published 2026-09-16; the wheel's
+  sha256 was checked against PyPI and its source read before first use. It runs with `uvx`
+  in its own environment, because it pins fastmcp 3.4.7, which would clash with our MCP SDK.
+- **Adapter (`services/alpaca_adapter`):** an MCP server with the replay server's tool
+  names, arguments and output shapes. It translates calls, unwraps Alpaca's trust envelope,
+  normalizes timestamps and numbers, and masks the account number. The gateway runs it in
+  process as the `alpaca` upstream (`--upstream alpaca`), so policies, taint labels and
+  intent checks are untouched. Only nine tools are exposed: no options, crypto, account
+  config, or "close all positions".
+- **Paper only, four layers:** settings refusal, explicit `TRADING_MODE=paper`, a from
+  scratch child environment with `ALPACA_PAPER_TRADE=true` (that server switches to live
+  on any other value), and a paper account check on connect. Any failure to verify,
+  including bad keys, refuses to start.
+- **No unguarded mode** against Alpaca, in the CLI or the dashboard.
+Alternatives considered:
+- Proxying Alpaca's own tool names and rewriting policies per broker: two policy
+  vocabularies to keep in sync.
+- Calling Alpaca's REST API directly: drops the "official MCP server as an upstream"
+  requirement.
+- Installing the server into our environment: dependency conflict.
+Consequences: a new Alpaca server release needs a deliberate version bump and a re-check of
+the tool schemas. Pattern tools aren't available on paper yet.
