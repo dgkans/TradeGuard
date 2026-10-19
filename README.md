@@ -10,6 +10,7 @@ blocked, or held for your approval, and every decision is logged.
 [![CI](https://github.com/dgkans/TradeGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/dgkans/TradeGuard/actions/workflows/ci.yml)
 
 **Live demo:** [tradeguard-4c9.pages.dev](https://tradeguard-4c9.pages.dev)
+
 **Trades are paper only.** No real money moves, and the app refuses to start if live
 trading is configured.
 
