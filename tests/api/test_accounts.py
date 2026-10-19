@@ -98,3 +98,26 @@ async def test_postgres_store_round_trip() -> None:
         async with PostgresTraderStore(database_url()) as store:  # leave no test accounts
             await store.delete(trader.id)
             assert await store.by_username(name) is None
+
+
+async def test_postgres_usage_counts_add_up_and_never_go_negative() -> None:
+    from datetime import date
+
+    from tests.gateway.test_audit_postgres import database_url, postgres_available
+
+    if not postgres_available():
+        pytest.skip("Postgres not reachable")
+    from services.api.accounts import PostgresTraderStore
+    from services.gateway.audit import migrate
+
+    migrate(database_url())
+    key, day = f"test-{uuid.uuid4().hex[:8]}", date(2026, 10, 18)
+    async with PostgresTraderStore(database_url()) as store:
+        try:
+            assert await store.usage(day, [key]) == {key: 0}
+            assert await store.add_usage(day, key, 1) == 1
+            assert await store.add_usage(day, key, 1) == 2
+            assert await store.add_usage(day, key, -5) == 0
+            assert await store.usage(day, [key, "nobody"]) == {key: 0, "nobody": 0}
+        finally:
+            await store._connection().execute("delete from ai_usage where key = %s", (key,))

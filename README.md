@@ -315,7 +315,6 @@ creates the tables. Open it with
 | Postgres | Neon | Accounts, audit log, approvals; open it with psql, TablePlus or Neon's SQL editor |
 | Dashboard | Cloudflare Pages | The static React build; it calls the API with `VITE_API_URL` |
 | AI | Groq | `openai/gpt-oss-120b` acts, `openai/gpt-oss-20b` classifies and judges |
-| Keep awake | UptimeRobot | Pings `/healthz` every 5 minutes |
 
 Every push to `main` deploys by itself:
 - Render waits for GitHub CI (tests, the Docker image, a secret scan) to pass.
@@ -324,9 +323,18 @@ Every push to `main` deploys by itself:
 Secrets live only in the Render dashboard, never in git or the client bundle. Production
 refuses to start without `ADMIN_PASSWORD`, `TRADER_TOKEN_SECRET` and the Groq key.
 
+**It sleeps when idle:**
+- The API shares the owner's existing Render workspace and its 750 free hours a month, so
+  it isn't kept awake.
+- After 15 minutes without visitors it sleeps; the next visitor waits about a minute. The
+  dashboard shows "Starting the server…" until it answers.
+- Prices refresh only while it's awake. Accounts, positions and the daily AI counts are in
+  Postgres, so nothing is lost.
+
 **Free plan guard rails:**
 - Groq allows about 200K tokens a day on the main model, so the site caps AI turns per day
-  (30 in all, 10 per trader, in `render.yaml`) and shows "N AI requests left today".
+  (30 in all, 10 per trader, in `render.yaml`) and shows "N AI requests left today". The
+  counts are kept in Postgres.
 - Rate limits and provider outages show a plain message, and a failed turn isn't counted.
 - Sign ups are limited per address.
 - Neon suspends an idle database; every store reconnects on its own.
@@ -338,7 +346,8 @@ refuses to start without `ADMIN_PASSWORD`, `TRADER_TOKEN_SECRET` and the Groq ke
 2. **Neon:** sign up at neon.tech and create a project in AWS US West (Oregon), Postgres 16.
    Under *Connect*, turn **Connection pooling off** and copy the connection string (it ends
    in `?sslmode=require`).
-3. **Render:** sign up with GitHub, then *New → Blueprint* and pick `dgkans/TradeGuard`.
+3. **Render:** in your existing account, connect GitHub, then *New → Blueprint* and pick
+   `dgkans/TradeGuard`.
    Render reads `render.yaml` and asks for:
    - `DATABASE_URL`: the Neon string;
    - `GROQ_API_KEY`;
@@ -355,8 +364,10 @@ refuses to start without `ADMIN_PASSWORD`, `TRADER_TOKEN_SECRET` and the Groq ke
 
    The site gets an address like `https://tradeguard.pages.dev`.
 5. **Back in Render:** set `CORS_ORIGINS` to the Pages address. Render redeploys.
-6. **UptimeRobot:** add an HTTP monitor for `https://<render address>/healthz` every 5
-   minutes. This keeps the API awake, using about all of Render's 750 free hours.
+
+Don't add an uptime ping: kept awake, the API alone would use about all of the
+workspace's 750 free hours, and Render then suspends every free service in it (including
+other projects) until the next month.
 
 Check it: open the Pages address, sign up, ask "What is NVDA at?", and log in as `admin`.
 `https://<render address>/readyz` should show `"database":"ok","prices":"ok"`.

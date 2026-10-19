@@ -2030,3 +2030,11 @@ nav {
     animation: none;
   }
 }
+
+.wake-banner {
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--escalate-bg);
+  color: var(--escalate);
+  font-size: 14px;
+}

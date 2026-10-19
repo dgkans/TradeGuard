@@ -1,6 +1,7 @@
 # Render Blueprint for the TradeGuard API (F12). Free plan, one Docker web service.
 # Secrets (sync: false) are typed into Render's dashboard once, never committed here.
-# Deploys only after GitHub CI passes on main.
+# Deploys only after GitHub CI passes on main. It sleeps after 15 idle minutes (no keep
+# awake ping): it shares the owner's workspace and its 750 free hours a month.
 services:
   - type: web
     name: tradeguard-api

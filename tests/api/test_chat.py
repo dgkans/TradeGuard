@@ -550,6 +550,24 @@ async def test_a_trader_gets_a_friendly_message_after_their_daily_ai_turns() -> 
     assert left == 0
 
 
+async def test_daily_ai_turns_survive_the_api_sleeping_and_waking() -> None:
+    """Render's free plan restarts the API on wake; the counts are in the store (F12)."""
+    store = MemoryTraderStore()
+    first = Stack([quote_script()], store=store, trader_daily_turn_cap=1)
+    async with first.client() as client:
+        asha = await signup(client)
+        await send(client, asha, "What is NVDA at?")
+    woken = Stack([quote_script()], store=store, trader_daily_turn_cap=1)  # a new process
+    async with woken.client() as client:
+        login = await client.post("/auth/login", json={"username": "asha",
+                                                        "password": "pw-asha-123"})  # fmt: skip
+        again = {"x-trader-token": login.json()["token"]}
+        left = (await get(client, again, "/me"))["session"]["ai_turns_left"]
+        refused = await client.post("/me/messages", json={"text": "hi"}, headers=again)
+    assert left == 0
+    assert refused.status_code == 429
+
+
 async def test_the_site_wide_daily_cap_stops_every_trader() -> None:
     stack = Stack([quote_script(), quote_script()], daily_turn_cap=1)
     async with stack.client() as client:

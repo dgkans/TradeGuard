@@ -16,6 +16,7 @@ import json
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from types import TracebackType
 from typing import Any, Protocol
 
@@ -142,12 +143,17 @@ class TraderStore(Protocol):
 
     async def ping(self) -> None: ...
 
+    async def usage(self, day: date, keys: list[str]) -> dict[str, int]: ...
+
+    async def add_usage(self, day: date, key: str, delta: int) -> int: ...
+
 
 class MemoryTraderStore:
     """For tests and runs without a database."""
 
     def __init__(self) -> None:
         self._traders: dict[int, Trader] = {}
+        self._usage: dict[tuple[date, str], int] = {}
 
     async def create(self, username: str, password_hash: str, display_name: str,
                      profile: str, starting_cash: float) -> Trader:  # fmt: skip
@@ -185,6 +191,14 @@ class MemoryTraderStore:
 
     async def ping(self) -> None:
         return None
+
+    async def usage(self, day: date, keys: list[str]) -> dict[str, int]:
+        return {key: self._usage.get((day, key), 0) for key in keys}
+
+    async def add_usage(self, day: date, key: str, delta: int) -> int:
+        total = max(0, self._usage.get((day, key), 0) + delta)
+        self._usage[(day, key)] = total
+        return total
 
 
 COLUMNS = ("id, username, display_name, password_hash, profile, starting_cash, limits, "
@@ -274,3 +288,23 @@ class PostgresTraderStore:
     async def ping(self) -> None:
         """Raises if the database doesn't answer."""
         await self._one("select 1", ())
+
+    async def usage(self, day: date, keys: list[str]) -> dict[str, int]:
+        """AI turns used on `day` per key (migration 0006); 0 when there's no row."""
+        async with self._lock:
+            cursor = await self._connection().execute(
+                "select key, turns from ai_usage where day = %s and key = any(%s)", (day, keys)
+            )
+            rows = await cursor.fetchall()
+        found = {str(row[0]): int(row[1]) for row in rows}
+        return {key: found.get(key, 0) for key in keys}
+
+    async def add_usage(self, day: date, key: str, delta: int) -> int:
+        """Add `delta` turns (negative to refund) and return the new total, never below 0."""
+        row = await self._one(
+            "insert into ai_usage (day, key, turns) values (%s, %s, greatest(%s, 0)) "
+            "on conflict (day, key) do update set turns = greatest(ai_usage.turns + %s, 0), "
+            "updated_at = now() returning turns",
+            (day, key, delta, delta),
+        )
+        return int(row[0]) if row else 0

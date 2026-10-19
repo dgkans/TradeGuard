@@ -656,7 +656,7 @@ Work:
 
 ## Current feature: F12 Deployment (user decisions 2026-10-18)
 ### Plan
-User choices: Render (API) + Neon (Postgres) + Cloudflare Pages (dashboard), Groq for the AI, the backend kept awake by an uptime ping, and a push to GitHub after each approved feature (it auto-deploys). Live prices and accounts stay on (F10f), replacing PLAN 13.2's "replay only" demo mode.
+User choices: Render (API, in the owner's existing workspace, sleeping when idle) + Neon (Postgres) + Cloudflare Pages (dashboard), Groq for the AI, and a push to GitHub after each approved feature (it auto-deploys). The user first chose an uptime ping, then dropped it: the workspace is shared with another project, and an always-on API would use its 750 free hours. Live prices and accounts stay on (F10f), replacing PLAN 13.2's "replay only" demo mode.
 - **AI on Groq:**
   - `LLM_PROVIDER=groq`. The agent uses `openai/gpt-oss-120b` and the intent judge `openai/gpt-oss-20b` (Groq limits are per model, so the free budget doubles).
   - JSON mode for the understand step and the judge. The key is read only from the host's settings.
@@ -677,11 +677,12 @@ User choices: Render (API) + Neon (Postgres) + Cloudflare Pages (dashboard), Gro
   - Cloudflare Pages builds `dashboard/`, runs its checks, and publishes. It has security headers and hash routing, so no rewrites.
   - CI gains a Docker build and a secret scan.
 - **Before the first push:** scan the whole git history for secrets; the repo is public.
-- **Owner steps** (sign-ups, done by the user; no card): Render, Neon, Cloudflare, Groq and UptimeRobot. Keys go into the host dashboards, never into chat.
+- **Owner steps** (sign-ups, done by the user; no card): Neon, Cloudflare and Groq, plus the owner's existing Render account. Keys go into the host dashboards, never into chat.
 - **After going live:** check that Yahoo answers from Render's servers. If it doesn't, the fallback is a free Finnhub key.
 ### Acceptance
 - [x] Groq provider works with tool calls and JSON (tested with a recorded request; a live call waits for the key)
-- [x] Daily caps and per-IP sign-up limits enforced with friendly messages (tested; rate limits 429, provider failures 503, failed turns refunded)
+- [x] Daily caps and per-IP sign-up limits enforced with friendly messages (tested; rate limits 429, provider failures 503, failed turns refunded; counts survive a restart, migration 0006)
+- [x] The dashboard says "Starting the server…" while the sleeping API wakes (tested)
 - [x] Stores survive the database dropping idle connections (tested by killing the connections in Postgres)
 - [x] The production start path runs locally with production settings (migrate, `/readyz` ok, CORS, 223 MB idle); the Docker image is built and started in CI (first run on the first push)
 - [x] No secrets in git history, the image or the client bundle (gitleaks: 26 commits clean, bundle clean; `.env` is ignored by git and Docker)

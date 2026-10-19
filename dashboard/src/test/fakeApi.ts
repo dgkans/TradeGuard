@@ -21,6 +21,7 @@ export function fakeApi(overrides: Partial<Api> = {}): Api {
     limits: notMocked("limits"),
     setLimits: notMocked("setLimits"),
     stopped: notMocked("stopped"),
+    health: vi.fn(async () => undefined),
     marketOverview: notMocked("marketOverview"),
     marketStatus: notMocked("marketStatus"),
     adminLogout: vi.fn(),

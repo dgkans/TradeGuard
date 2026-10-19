@@ -54,6 +54,8 @@ export interface Api {
   /** What the guard blocked or held for this trader. */
   stopped(): Promise<RuleCount[]>;
   // --- market (public) ---
+  /** Resolves once the API answers (it sleeps when idle on the free host, F12). */
+  health(): Promise<void>;
   marketOverview(): Promise<MarketOverview>;
   marketStatus(): Promise<MarketStatus>;
   // --- admin (owner only) ---
@@ -203,6 +205,9 @@ export const httpApi: Api = {
     request<LimitsView>("/me/limits", { method: "PUT", body: JSON.stringify(limits) }),
   async stopped() {
     return (await request<{ rules: RuleCount[] }>("/me/stopped")).rules;
+  },
+  async health() {
+    await request<unknown>("/healthz");
   },
   marketOverview: () => request<MarketOverview>("/market/overview"),
   marketStatus: () => request<MarketStatus>("/market/status"),

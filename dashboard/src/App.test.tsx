@@ -104,4 +104,19 @@ describe("App", () => {
     expect(nav).not.toHaveTextContent(/Audit log/);
     expect(nav).toHaveTextContent(/Chat & Trade/);
   });
+
+  it("says the server is waking up when it doesn't answer quickly, then hides it", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let wake: () => void = () => undefined;
+      renderApp({ health: vi.fn(() => new Promise<void>((resolve) => { wake = resolve; })) });
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      await vi.advanceTimersByTimeAsync(3500);
+      expect(screen.getByRole("status")).toHaveTextContent(/Starting the server/);
+      wake();
+      await vi.waitFor(() => expect(screen.queryByText(/Starting the server/)).not.toBeInTheDocument());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

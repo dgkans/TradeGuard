@@ -50,6 +50,7 @@ from services.gateway.policy.model import Policy
 
 logger = logging.getLogger(__name__)
 PAPER_SCENARIO = "alpaca_paper"
+USAGE_ALL = "all"  # the site-wide AI turn count (F12)
 DEFAULT_SCENARIO = "desk"
 FILL_MINUTES = 5
 # Trader sessions only: the CLI and the evals keep the plain system prompt.
@@ -286,7 +287,7 @@ class ChatSession:
         self._claim()
         if self.pending is not None:
             raise ChatBusyError("waiting for an approval decision: approve or reject it first")
-        self.service.spend_turn(self)
+        await self.service.spend_turn(self)
         async with self._lock:
             self.transcript.append({"role": "user", "text": text})
             start = len(self.log.records)
@@ -303,7 +304,7 @@ class ChatSession:
             try:
                 result = await self._run(job)
             except (ChatQuotaError, AiUnavailableError):
-                self.service.refund_turn(self)  # the AI never answered: don't charge it
+                await self.service.refund_turn(self)  # the AI never answered: don't charge it
                 raise
             turn = self._finish(result, start)
         await self.service.persist(self)
@@ -545,8 +546,9 @@ class ChatService:
         self.trader_daily_turn_cap = trader_daily_turn_cap
         self.history_turns = history_turns
         self._day = datetime.now(UTC).date()
-        self._turns_today = 0
-        self._turns_by_trader: dict[str, int] = {}
+        self._counts: dict[str, int] = {}
+        self._loaded: set[str] = set()
+        self._usage_lock = asyncio.Lock()
         self.sessions: dict[str, ChatSession] = {}
         self._opening: dict[int, asyncio.Lock] = {}
 
@@ -569,6 +571,7 @@ class ChatService:
             session = ChatSession(session_id, spec, self)
             await session.start()
             session.restore(trader)
+            await self.load_usage(session)
             self.sessions[session_id] = session
             return session
 
@@ -578,49 +581,70 @@ class ChatService:
         today = datetime.now(UTC).date()
         if today != self._day:
             self._day = today
-            self._turns_today = 0
-            self._turns_by_trader = {}
+            self._counts = {}
+            self._loaded = set()
 
     @staticmethod
     def _who(session: ChatSession) -> str:
         trader_id = session.spec.trader_id
         return f"trader-{trader_id}" if trader_id is not None else session.session_id
 
-    def spend_turn(self, session: ChatSession) -> None:
-        """Count one AI turn, or raise ChatQuotaError when a daily cap is reached. Counts
-        live in this process and reset at 00:00 UTC (and on restart)."""
+    async def _load(self, keys: list[str]) -> None:
+        """Bring today's counts for `keys` into memory (from Postgres when there is one)."""
         self._today()
-        who = self._who(session)
-        if self.daily_turn_cap and self._turns_today >= self.daily_turn_cap:
-            raise ChatQuotaError(
-                "The AI has used today's free budget. Positions and limits still work; "
-                "chat is back after 00:00 UTC."
-            )
-        used = self._turns_by_trader.get(who, 0)
-        if self.trader_daily_turn_cap and used >= self.trader_daily_turn_cap:
-            raise ChatQuotaError(
-                f"You've used your {self.trader_daily_turn_cap} AI requests for today. "
-                "They reset at 00:00 UTC."
-            )
-        self._turns_today += 1
-        self._turns_by_trader[who] = used + 1
+        missing = [key for key in keys if key not in self._loaded]
+        if missing and self.store is not None:
+            self._counts.update(await self.store.usage(self._day, missing))
+        self._loaded.update(missing)
 
-    def refund_turn(self, session: ChatSession) -> None:
+    async def _add(self, key: str, delta: int) -> None:
+        if self.store is not None:
+            self._counts[key] = await self.store.add_usage(self._day, key, delta)
+        else:
+            self._counts[key] = max(0, self._counts.get(key, 0) + delta)
+
+    async def load_usage(self, session: ChatSession) -> None:
+        await self._load([USAGE_ALL, self._who(session)])
+
+    async def spend_turn(self, session: ChatSession) -> None:
+        """Count one AI turn, or raise ChatQuotaError when a daily cap is reached. Counts
+        are kept in Postgres, so they survive the API sleeping and waking (F12), and reset
+        at 00:00 UTC."""
+        async with self._usage_lock:
+            who = self._who(session)
+            await self._load([USAGE_ALL, who])
+            if self.daily_turn_cap and self._counts.get(USAGE_ALL, 0) >= self.daily_turn_cap:
+                raise ChatQuotaError(
+                    "The AI has used today's free budget. Positions and limits still work; "
+                    "chat is back after 00:00 UTC."
+                )
+            if (
+                self.trader_daily_turn_cap
+                and self._counts.get(who, 0) >= self.trader_daily_turn_cap
+            ):
+                raise ChatQuotaError(
+                    f"You've used your {self.trader_daily_turn_cap} AI requests for today. "
+                    "They reset at 00:00 UTC."
+                )
+            await self._add(USAGE_ALL, 1)
+            await self._add(who, 1)
+
+    async def refund_turn(self, session: ChatSession) -> None:
         """Give back a turn the AI provider failed to serve."""
-        self._today()
-        who = self._who(session)
-        self._turns_today = max(0, self._turns_today - 1)
-        self._turns_by_trader[who] = max(0, self._turns_by_trader.get(who, 0) - 1)
+        async with self._usage_lock:
+            who = self._who(session)
+            await self._load([USAGE_ALL, who])
+            await self._add(USAGE_ALL, -1)
+            await self._add(who, -1)
 
     def turns_left(self, session: ChatSession) -> int | None:
         """AI turns this trader has left today, or None when there's no cap."""
         self._today()
         left = []
         if self.daily_turn_cap:
-            left.append(self.daily_turn_cap - self._turns_today)
+            left.append(self.daily_turn_cap - self._counts.get(USAGE_ALL, 0))
         if self.trader_daily_turn_cap:
-            used = self._turns_by_trader.get(self._who(session), 0)
-            left.append(self.trader_daily_turn_cap - used)
+            left.append(self.trader_daily_turn_cap - self._counts.get(self._who(session), 0))
         return max(0, min(left)) if left else None
 
     def settle(self) -> list[ChatSession]:

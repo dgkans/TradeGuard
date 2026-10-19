@@ -667,21 +667,33 @@ Consequences:
 Date: 2026-10-18
 Decision (user choices):
 - Render free web service (Docker) for the API, Neon for Postgres, Cloudflare Pages for the
-  dashboard, Groq for the AI, and UptimeRobot to keep the API awake.
+  dashboard, and Groq for the AI.
+- **The API sleeps when idle.** It goes in the owner's existing Render workspace, which
+  already hosts another project. Render's 750 free hours are per workspace, and an
+  always-on service would use about all of them. Then Render suspends every free service
+  in the workspace until the next month. So there is no keep-awake ping.
+  - The first visitor after 15 idle minutes waits about a minute; the dashboard says the
+    server is starting.
+  - Daily AI counts are in Postgres (migration 0006), because each wake is a restart.
+- The user asked about a second Render account with another email. That was declined: a
+  duplicate account to get more free usage risks suspension of both. Running the API on the
+  Mac through a tunnel was considered and rejected by the user: a stable free address needs
+  Tailscale Funnel (Cloudflare needs a paid domain), and the site would be down whenever
+  the Mac sleeps.
 - Every approved feature is pushed to `main` and deploys automatically. Render deploys only
   after GitHub CI passes; Cloudflare builds only if the dashboard's checks pass.
 - **Live, not "replay only":** PLAN 13.2 planned a replay-only demo with a recorded runs
   gallery. The user wants live prices and real accounts in production, so the demo is the
-  product. The gallery is dropped for now: it existed to cover a cold start, and the API is
-  kept awake.
+  product. The gallery is dropped for now; the dashboard covers the cold start with a
+  "starting the server" notice instead.
 - **Fitting Groq's free plan** (checked 2026-10-18): `gpt-oss-120b` and `gpt-oss-20b` each
   allow 30 requests and 8K tokens a minute, and 1K requests and 200K tokens a day.
   - The agent acts on 120b; the classify step and the judge use 20b, because limits are
     per model.
   - Short hidden reasoning, and up to 5 retries that honour `retry-after`.
   - Trader chats send only the last 3 turns to the model. Evals and the CLI are unchanged.
-  - Daily caps: 30 turns in all and 10 per trader, counted in memory, reset at 00:00 UTC
-    and on restart. A failed turn is refunded.
+  - Daily caps: 30 turns in all and 10 per trader, counted in Postgres, reset at 00:00
+    UTC. A failed turn is refunded.
 - **Neon suspends idle databases:** every store's connection is checked with `select 1`
   after 30 s idle and replaced if dead. A statement is never retried, so writes can't be
   doubled.
@@ -702,4 +714,3 @@ Consequences and risks:
   a free Finnhub key as the fallback.
 - The eval numbers in RESULTS.md are for qwen3:8b on Ollama. The live site runs gpt-oss on
   Groq and has no eval numbers of its own (PLAN 15.2 rule 2).
-- Caps reset when the API restarts (each deploy).

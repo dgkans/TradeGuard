@@ -109,6 +109,42 @@ function MarketBadge() {
   );
 }
 
+const WAKE_NOTICE_MS = 3000;
+const WAKE_RETRY_MS = 5000;
+
+/** True while the API is starting up. On the free host it sleeps when nobody uses it and
+ * takes about a minute to wake (F12). */
+function useWaking(): boolean {
+  const api = useApi();
+  const [waking, setWaking] = useState(false);
+  useEffect(() => {
+    let live = true;
+    let answered = false;
+    const notice = window.setTimeout(() => {
+      if (live && !answered) setWaking(true);
+    }, WAKE_NOTICE_MS);
+    const check = async () => {
+      while (live) {
+        try {
+          await api.health();
+          answered = true;
+          if (live) setWaking(false);
+          return;
+        } catch {
+          if (live) setWaking(true);
+          await new Promise((resolve) => window.setTimeout(resolve, WAKE_RETRY_MS));
+        }
+      }
+    };
+    void check();
+    return () => {
+      live = false;
+      window.clearTimeout(notice);
+    };
+  }, [api]);
+  return waking;
+}
+
 function NavLink({ path, label, active }: { path: Path; label: string; active: boolean }) {
   return (
     <a href={`#/${path}`} className={`nav-link ${active ? "nav-active" : ""}`}
@@ -150,6 +186,7 @@ export function App() {
   const path = useRoute();
   const { me, checked, refresh, setMe } = useMe(5000);
   const [howOpen, setHowOpen] = useState(false);
+  const waking = useWaking();
   const [admin, setAdmin] = useState(() => api.isAdmin());
   const adminPage = ADMIN.some((page) => page.path === path);
 
@@ -191,6 +228,12 @@ export function App() {
           </button>
         </div>
       </header>
+      {waking ? (
+        <div className="wake-banner" role="status">
+          Starting the server… It sleeps when nobody is using it and takes about a minute to
+          wake up. This page will fill in by itself.
+        </div>
+      ) : null}
       <HowItWorks open={howOpen} onClose={() => setHowOpen(false)} />
       {admin ? (
         <div className="desk">
