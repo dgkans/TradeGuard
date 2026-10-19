@@ -22,6 +22,18 @@ const data: Overview = {
 };
 
 describe("MarketOverview", () => {
+  it("names the live source and the price time", async () => {
+    const live = { ...data, live: true, source: "Yahoo Finance",
+                   prices_as_of: "2026-10-16T20:00:00+00:00", market_open: false };
+    render(
+      <ApiContext.Provider value={fakeApi({ marketOverview: vi.fn(async () => live) })}>
+        <MarketOverview />
+      </ApiContext.Provider>,
+    );
+    expect(await screen.findByText(/Market closed · live prices from Yahoo Finance, as of .*16:00 ET/))
+      .toBeInTheDocument();
+  });
+
   it("shows index and stock cards with prices, day change and a sparkline", async () => {
     render(
       <ApiContext.Provider value={fakeApi({ marketOverview: vi.fn(async () => data) })}>

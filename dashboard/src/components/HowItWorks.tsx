@@ -79,8 +79,8 @@ export function HowItWorks({ open, onClose }: { open: boolean; onClose: () => vo
         <p>
           TradeGuard speaks MCP, the standard way AI agents call tools. A broker connects by
           exposing its trading tools (quote, account, positions, orders, place and cancel) to
-          TradeGuard instead of directly to the agent. This demo runs on a replayed market;
-          the same guard runs in front of Alpaca's paper trading API.
+          TradeGuard instead of directly to the agent. This demo trades a paper account at
+          live market prices; the same guard runs in front of Alpaca's paper trading API.
         </p>
       </div>
     </div>

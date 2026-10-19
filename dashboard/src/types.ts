@@ -262,6 +262,10 @@ export interface MarketItem {
 export interface MarketOverview {
   as_of: string;
   market_open: boolean;
+  /** Live prices (F10f) or the replay fixtures. */
+  live?: boolean;
+  source?: string;
+  prices_as_of?: string | null;
   indices: MarketItem[];
   watchlist: MarketItem[];
   movers: { symbol: string; day_change_pct: number }[];
@@ -288,11 +292,20 @@ export interface SignupForm {
   profile: string;
 }
 
-export interface DeskClock {
-  now: string | null;
-  ended: boolean;
+/** Where prices come from and how fresh they are (F10f). */
+export interface MarketStatus {
   live: boolean;
+  source: string;
+  now: string | null;
+  market_open: boolean;
+  session_start: string | null;
+  session_end: string | null;
+  prices_as_of: string | null;
+  updated_at: string | null;
+  stale: boolean;
 }
+
+export type Role = "trader" | "admin";
 
 export interface AdminTrader extends TraderInfo {
   active: boolean;

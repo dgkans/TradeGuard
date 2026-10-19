@@ -16,7 +16,7 @@ export function changeTone(value: number): string {
   return "";
 }
 
-/** The market overview, refreshed as the shared replayed clock moves (F10e). */
+/** The market overview, refreshed as live prices come in (F10f). */
 function useOverview(pollMs = 15_000): { data: Overview | null; error: unknown } {
   const api = useApi();
   const [data, setData] = useState<Overview | null>(null);
@@ -93,8 +93,10 @@ export function MarketOverview() {
       <div className="market-head">
         <h2>Market today</h2>
         <span className="muted small">
-          {marketTime(data.as_of)} · {data.market_open ? "market open" : "market closed"} ·
-          replayed market, updates live
+          {data.market_open ? "Market open" : "Market closed"} ·{" "}
+          {data.live
+            ? `live prices from ${data.source ?? "Yahoo Finance"}, as of ${marketTime(data.prices_as_of ?? data.as_of)}`
+            : `replayed market, ${marketTime(data.as_of)}`}
         </span>
       </div>
       <div className="market-grid">

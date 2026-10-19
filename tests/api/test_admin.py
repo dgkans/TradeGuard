@@ -1,6 +1,8 @@
-"""Admin login (F10d): one owner password from settings, signed tokens, no database."""
+"""Admin login (F10d, F10f): `admin` plus the owner password on the normal login form,
+signed tokens, no database."""
 
 import time
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,15 +33,20 @@ def client(auth: AdminAuth | None = None) -> TestClient:
     return TestClient(create_app(deps))
 
 
-def test_login_returns_a_token_that_opens_admin_endpoints() -> None:
+def admin_login(c: TestClient, password: str, username: str = "admin") -> Any:
+    return c.post("/auth/login", json={"username": username, "password": password})
+
+
+def test_admin_logs_in_on_the_normal_form_and_gets_the_admin_endpoints() -> None:
     with client() as c:
-        bad = c.post("/admin/login", json={"password": "nope"})
-        good = c.post("/admin/login", json={"password": PASSWORD})
+        bad = admin_login(c, "nope")
+        good = admin_login(c, PASSWORD, username="Admin")  # any case
         token = good.json()["token"]
         me = c.get("/admin/me", headers={"authorization": f"Bearer {token}"})
         audit = c.get("/audit", headers={"authorization": f"Bearer {token}"})
-    assert bad.status_code == 401
-    assert good.status_code == 200 and good.json()["expires_at"]
+    assert bad.status_code == 401 and bad.json()["detail"] == "wrong username or password"
+    assert good.status_code == 200 and good.json()["role"] == "admin"
+    assert good.json()["expires_at"]
     assert me.json() == {"admin": True}
     assert audit.status_code == 200
 
@@ -77,14 +84,14 @@ def test_repeated_failures_lock_login_for_a_while() -> None:
     with pytest.raises(AdminLockedError):
         auth.login(PASSWORD)  # even the right password waits out the lock
     with client(auth) as c:
-        assert c.post("/admin/login", json={"password": PASSWORD}).status_code == 429
+        assert admin_login(c, PASSWORD).status_code == 429
 
 
 def test_admin_is_off_when_no_password_is_set() -> None:
     with client(AdminAuth(None)) as c:
-        login = c.post("/admin/login", json={"password": ""})
+        login = admin_login(c, "anything")
         audit = c.get("/audit")
-    assert login.status_code == 503
+    assert login.status_code == 401  # same answer as a wrong password
     assert audit.status_code == 401
 
 
@@ -95,3 +102,9 @@ def test_trader_pages_stay_open() -> None:
         assert c.get("/policies/default").status_code == 200
         assert c.get("/scenarios").status_code == 200
         assert c.get("/market/overview").status_code == 200
+        assert c.get("/market/status").json()["live"] is False  # no feed in this app
+
+
+def test_the_old_admin_login_route_is_gone() -> None:
+    with client() as c:
+        assert c.post("/admin/login", json={"password": PASSWORD}).status_code in (404, 405)

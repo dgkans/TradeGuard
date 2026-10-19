@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, useApi } from "./api";
 import { AccountPanel } from "./components/AccountPanel";
-import { AdminLogin } from "./components/AdminLogin";
 import { HowItWorks } from "./components/HowItWorks";
 import { MarketOverview, MarketWatch } from "./components/MarketOverview";
-import { marketTime } from "./format";
+import { statusText } from "./format";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { ChatPage } from "./pages/ChatPage";
@@ -13,16 +12,16 @@ import { LimitsPage } from "./pages/LimitsPage";
 import { PoliciesPage } from "./pages/PoliciesPage";
 import { PositionsPage } from "./pages/PositionsPage";
 import { TradersPage } from "./pages/TradersPage";
-import type { DeskClock, Me } from "./types";
+import type { MarketStatus, Me, Role } from "./types";
 
-// Every visitor sees these; they ask for a log in first.
+// Traders see these; they ask for a log in first.
 const TRADER = [
   { path: "chat", label: "Chat & Trade" },
   { path: "positions", label: "Positions" },
   { path: "limits", label: "My limits" },
 ] as const;
 
-// Only the owner, after the admin login.
+// Only the owner, logged in as `admin` on the same form (F10f).
 const ADMIN = [
   { path: "traders", label: "Traders" },
   { path: "approvals", label: "Approvals" },
@@ -85,25 +84,27 @@ function useMe(pollMs: number) {
   return { me, checked, refresh, setMe };
 }
 
-/** The shared replayed market's time, ticking forward. */
-function ClockBadge() {
+/** Where prices come from and whether the market is open (F10f). */
+function MarketBadge() {
   const api = useApi();
-  const [clock, setClock] = useState<DeskClock | null>(null);
+  const [status, setStatus] = useState<MarketStatus | null>(null);
   useEffect(() => {
     let live = true;
-    const load = () => api.deskClock().then((data) => live && setClock(data), () => undefined);
+    const load = () => api.marketStatus().then((data) => live && setStatus(data), () => undefined);
     void load();
-    const timer = window.setInterval(() => void load(), 10_000);
+    const timer = window.setInterval(() => void load(), 15_000);
     return () => {
       live = false;
       window.clearInterval(timer);
     };
   }, [api]);
-  if (!clock?.now) return null;
+  if (!status) return null;
+  const tone = status.stale ? "dot-escalate" : status.live && status.market_open ? "dot-live" : "";
   return (
-    <span className="clock-badge" title="A replayed market: real past prices, moving on their own">
-      <span className={`dot ${clock.ended ? "" : "dot-live"}`} aria-hidden="true" />
-      Replayed market · {marketTime(clock.now)}{clock.ended ? " · ended" : ""}
+    <span className="clock-badge"
+          title={status.live ? `Prices from ${status.source}; trades are paper only` : undefined}>
+      <span className={`dot ${tone}`} aria-hidden="true" />
+      {statusText(status)}
     </span>
   );
 }
@@ -124,8 +125,9 @@ function Landing({ onHow }: { onHow: () => void }) {
         <div>
           <h1>Trade in plain words. TradeGuard keeps the AI in check.</h1>
           <p className="lede">
-            Create an account on the left, then tell the agent what to trade. Every order is
-            checked against your limits and your request before it reaches the broker.
+            Create an account on the left, then tell the agent what to trade at live market
+            prices. Every order is checked against your limits and your request before it
+            reaches the broker. Trades are paper only: no real money.
           </p>
           <div className="hero-steps">
             <span><strong>1</strong> Sign up or log in</span>
@@ -148,13 +150,21 @@ export function App() {
   const path = useRoute();
   const { me, checked, refresh, setMe } = useMe(5000);
   const [howOpen, setHowOpen] = useState(false);
-  const [loginOpen, setLoginOpen] = useState(false);
   const [admin, setAdmin] = useState(() => api.isAdmin());
   const adminPage = ADMIN.some((page) => page.path === path);
 
-  function logoutAdmin() {
-    api.adminLogout();
+  function authed(role: Role) {
+    if (role === "admin") {
+      setAdmin(true);
+      window.location.hash = "#/traders";
+    } else {
+      void refresh();
+    }
+  }
+
+  function loggedOut() {
     setAdmin(false);
+    setMe(null);
     if (adminPage) window.location.hash = "#/chat";
   }
 
@@ -168,51 +178,34 @@ export function App() {
           </svg>
           TradeGuard
         </a>
-        <ClockBadge />
+        <MarketBadge />
         <nav aria-label="Pages">
-          {TRADER.map((page) => (
+          {(admin ? ADMIN : TRADER).map((page) => (
             <NavLink key={page.path} path={page.path} label={page.label}
                      active={page.path === path} />
           ))}
-          {admin ? ADMIN.map((page) => (
-            <NavLink key={page.path} path={page.path} label={page.label}
-                     active={page.path === path} />
-          )) : null}
         </nav>
         <div className="top-actions">
           <button type="button" className="button button-quiet how" onClick={() => setHowOpen(true)}>
             How it works
           </button>
-          {admin ? (
-            <button type="button" className="link-button" onClick={logoutAdmin}>
-              Admin log out
-            </button>
-          ) : (
-            <button type="button" className="link-button admin-link"
-                    onClick={() => setLoginOpen(true)}>
-              Admin
-            </button>
-          )}
         </div>
       </header>
       <HowItWorks open={howOpen} onClose={() => setHowOpen(false)} />
-      <AdminLogin open={loginOpen} onClose={() => setLoginOpen(false)}
-                  onLoggedIn={() => {
-                    setAdmin(true);
-                    setLoginOpen(false);
-                  }} />
-      {adminPage && admin ? (
-        <main className="content">
-          {path === "traders" ? <TradersPage /> : null}
-          {path === "approvals" ? <ApprovalsPage /> : null}
-          {path === "audit" ? <AuditPage /> : null}
-          {path === "activity" ? <PoliciesPage /> : null}
-          {path === "results" ? <EvalsPage /> : null}
-        </main>
+      {admin ? (
+        <div className="desk">
+          <AccountPanel me={null} admin onAuthed={authed} onLoggedOut={loggedOut} />
+          <main className="desk-main">
+            {path === "approvals" ? <ApprovalsPage />
+              : path === "audit" ? <AuditPage />
+              : path === "activity" ? <PoliciesPage />
+              : path === "results" ? <EvalsPage />
+              : <TradersPage />}
+          </main>
+        </div>
       ) : (
         <div className="desk">
-          <AccountPanel me={me} onAuthed={() => void refresh()}
-                        onLoggedOut={() => setMe(null)} />
+          <AccountPanel me={me} onAuthed={authed} onLoggedOut={loggedOut} />
           <main className="desk-main">
             {session ? (
               <>

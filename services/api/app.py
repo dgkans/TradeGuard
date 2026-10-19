@@ -3,9 +3,10 @@ admin area (approvals, audit log, eval reports).
 
     uv run tradeguard api                      # http://127.0.0.1:8000, docs at /docs
 
-Traders don't log in (user decision, F10d); the admin area needs ADMIN_PASSWORD
-(services/api/admin.py). The API binds to 127.0.0.1 for local use. Paper/replay only:
-trader sessions run replay scenarios.
+Traders sign up and log in (F10e); the owner logs in on the same form as `admin` with
+ADMIN_PASSWORD (F10f, services/api/admin.py). The desk is priced live from Yahoo Finance
+(F10f) and trades only in TradeGuard's simulated paper accounts, never a real broker. The
+API binds to 127.0.0.1 for local use.
 """
 
 import asyncio
@@ -14,10 +15,10 @@ import secrets
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, cast
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -44,8 +45,8 @@ from services.api.chat import (
     settings_models,
 )
 from services.api.describe import RULE_TITLES
-from services.api.desk import DeskClock
-from services.api.limits import Limits
+from services.api.limits import Limits, universe
+from services.api.live import LiveFeed, http_fetch
 from services.common.config import Settings
 from services.common.llm import make_chat_model
 from services.gateway.api.app import add_approval_routes
@@ -64,11 +65,11 @@ from services.gateway.audit import (
 from services.gateway.intent.judge import LlmJudge
 from services.gateway.policy.model import load_policy
 from services.gateway.provenance.store import PostgresProvenanceStore
-from services.replay_server.scenario import load_scenario
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
 DECISIONS = ("ALLOW", "DENY", "ESCALATE")
+ADMIN_USERNAME = "admin"  # the owner, on the normal login form (F10f)
 
 
 @dataclass
@@ -80,6 +81,7 @@ class ApiDeps:
     jaeger_ui_url: str = "http://localhost:16686"
     admin: AdminAuth = field(default_factory=lambda: AdminAuth(None))  # off unless configured
     accounts: "Accounts | None" = None  # trader sign up and log in (F10e)
+    feed: LiveFeed | None = None  # live prices (F10f); None: replay data
 
 
 @dataclass
@@ -114,10 +116,6 @@ class Login(BaseModel):
     password: str = Field(max_length=200)
 
 
-class AdminLogin(BaseModel):
-    password: str = Field(max_length=200)
-
-
 class TraderDecision(BaseModel):
     note: str = Field(default="", max_length=2000)
 
@@ -141,34 +139,22 @@ def create_app(deps: ApiDeps) -> FastAPI:
 
     admin_only = [Depends(require_admin)]
 
-    @app.post("/admin/login")
-    async def admin_login(body: AdminLogin) -> dict[str, str]:
-        try:
-            issued = deps.admin.login(body.password)
-        except AdminDisabledError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except AdminLockedError as exc:
-            raise HTTPException(status_code=429, detail=str(exc)) from exc
-        except AdminLoginError as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-        return {"token": issued.token, "expires_at": issued.expires_at}
-
     @app.get("/admin/me", dependencies=admin_only)
     async def admin_me() -> dict[str, bool]:
         return {"admin": True}
 
     @app.get("/market/overview")
     async def market_overview() -> dict[str, Any]:
-        clock = deps.chat.clock if deps.chat is not None else None
-        return market.overview(deps.repo_root, clock.now if clock else None)
+        return market.overview(deps.repo_root, deps.feed)
 
-    @app.get("/desk/clock")
-    async def desk_clock() -> dict[str, Any]:
-        """The shared replayed market time (F10e). Never presented as today's date."""
-        clock = deps.chat.clock if deps.chat is not None else None
-        if clock is None:
-            return {"now": None, "ended": False, "live": False}
-        return {"now": clock.now.isoformat(), "ended": clock.ended, "live": True}
+    @app.get("/market/status")
+    async def market_status() -> dict[str, Any]:
+        """Where prices come from, whether the market is open, and how fresh prices are."""
+        if deps.feed is None:
+            return {"live": False, "source": "replay", "now": None, "market_open": False,
+                    "session_start": None, "session_end": None, "prices_as_of": None,
+                    "updated_at": None, "stale": False}  # fmt: skip
+        return deps.feed.status()
 
     add_approval_routes(app, deps.approvals, dependencies=admin_only)
     add_audit_routes(app, deps, admin_only)
@@ -383,10 +369,13 @@ def add_account_routes(app: FastAPI, deps: ApiDeps, admin_only: list[Any]) -> No
     Mine = Annotated[ChatSession, Depends(me)]  # noqa: N806 - a type alias, named like one
 
     def issued(trader: Trader) -> dict[str, Any]:
-        return {"token": accounts().tokens.issue(trader.id), "trader": trader.public()}
+        return {"token": accounts().tokens.issue(trader.id), "role": "trader",
+                "trader": trader.public()}  # fmt: skip
 
     @app.post("/auth/signup", status_code=201)
     async def signup(body: Signup) -> dict[str, Any]:
+        if body.username.lower() == ADMIN_USERNAME:
+            raise HTTPException(status_code=409, detail="that username is taken")
         display = " ".join((body.display_name or body.username).split()) or body.username
         try:
             trader = await accounts().store.create(
@@ -400,8 +389,22 @@ def add_account_routes(app: FastAPI, deps: ApiDeps, admin_only: list[Any]) -> No
             raise HTTPException(status_code=409, detail="that username is taken") from exc
         return issued(trader)
 
+    def admin_login(password: str) -> dict[str, Any]:
+        try:
+            issued = deps.admin.login(password)
+        except AdminLockedError as exc:
+            raise HTTPException(
+                status_code=429, detail="too many attempts; try again later"
+            ) from exc
+        except (AdminDisabledError, AdminLoginError) as exc:
+            raise HTTPException(status_code=401, detail="wrong username or password") from exc
+        return {"token": issued.token, "role": "admin", "expires_at": issued.expires_at}
+
     @app.post("/auth/login")
     async def login(body: Login) -> dict[str, Any]:
+        """Traders, and the owner as `admin` (the admin views; F10f)."""
+        if body.username.lower() == ADMIN_USERNAME:
+            return admin_login(body.password)
         guard = accounts().guard
         if guard.locked(body.username):
             raise HTTPException(status_code=429, detail="too many attempts; try again later")
@@ -484,7 +487,7 @@ def add_account_routes(app: FastAPI, deps: ApiDeps, admin_only: list[Any]) -> No
         out = []
         for trader in await accounts().store.list_all():
             session = active.get(trader.id)
-            placed = sum(1 for event in trader.events if event.get("kind") == "place")
+            placed = len((trader.book or {}).get("orders", []))
             out.append({**trader.public(), "active": session is not None,
                         "waiting_for_approval": bool(session and session.pending),
                         "orders": placed})  # fmt: skip
@@ -515,11 +518,6 @@ def paper_watchlist(settings: Settings) -> list[str] | None:
     return symbols
 
 
-def desk_start() -> datetime:
-    """Where the shared clock starts the first time: the desk scenario's start time."""
-    return load_scenario("desk", REPO_ROOT / "scenarios").start_time
-
-
 def create_postgres_app(settings: Settings) -> FastAPI:
     """The API against DATABASE_URL. Trader sessions run their market and gateway in this
     process and share one set of Postgres stores (F10b); paper sessions use a subprocess."""
@@ -529,8 +527,14 @@ def create_postgres_app(settings: Settings) -> FastAPI:
     def stores() -> GatewayStores:
         return cast(GatewayStores, holder["stores"])
 
+    http: dict[str, httpx.AsyncClient] = {}
+
+    async def fetch(url: str, params: dict[str, Any]) -> dict[str, Any]:
+        return await http_fetch(http["client"])(url, params)
+
+    feed = LiveFeed(universe(), fetch) if settings.live_prices else None
     chat = ChatService(
-        connect=inprocess_connector(REPO_ROOT, stores, settings.approval_timeout_seconds),
+        connect=inprocess_connector(REPO_ROOT, stores, settings.approval_timeout_seconds, feed),
         models=settings_models(settings),
         approval_timeout_s=settings.approval_timeout_seconds,
         repo_root=REPO_ROOT,
@@ -549,17 +553,20 @@ def create_postgres_app(settings: Settings) -> FastAPI:
         jaeger_ui_url=settings.jaeger_ui_url,
         admin=AdminAuth(password),
         accounts=Accounts(store=_Late(holder, "traders"), tokens=TraderTokens(secret)),
+        feed=feed,
     )
 
-    async def tick_forever(clock: DeskClock, store: TraderStore) -> None:
-        """Move the shared replayed market on, every DESK_TICK_SECONDS (F10e)."""
+    async def poll_forever(live: LiveFeed) -> None:
+        """Refresh live prices, then fill or expire open orders and save changed accounts.
+        Polls less often while the market is closed (F10f)."""
         while True:
-            await asyncio.sleep(settings.desk_tick_seconds)
-            now = clock.tick()
-            if now is None:
-                return  # the data ended: the market stays at its last close
-            chat.sync(now)
-            await store.set_clock(now.isoformat())
+            await live.refresh()
+            for session in chat.settle():
+                await chat.persist(session)
+            open_now = live.market_open()
+            await asyncio.sleep(
+                settings.live_poll_seconds if open_now else settings.live_closed_poll_seconds
+            )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -576,15 +583,16 @@ def create_postgres_app(settings: Settings) -> FastAPI:
             holder["audit"] = reader
             holder["traders"] = traders
             holder["stores"] = GatewayStores(sink, approvals, provenance, judge)
-            saved = await traders.get_clock()
-            start = datetime.fromisoformat(saved) if saved else desk_start()
-            chat.clock = DeskClock(REPO_ROOT / "fixtures/bars", start)
             chat.store = traders
-            ticker = asyncio.create_task(tick_forever(chat.clock, traders), name="desk-clock")
+            poller = None
+            if feed is not None:
+                http["client"] = await stack.enter_async_context(httpx.AsyncClient(timeout=15))
+                poller = asyncio.create_task(poll_forever(feed), name="live-prices")
             try:
                 yield
             finally:
-                ticker.cancel()
+                if poller is not None:
+                    poller.cancel()
                 for session in list(chat.sessions.values()):
                     await chat.persist(session)
                 await chat.close_all()

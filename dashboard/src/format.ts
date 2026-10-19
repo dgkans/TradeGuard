@@ -1,4 +1,4 @@
-import type { Json, JsonObject } from "./types";
+import type { Json, JsonObject, MarketStatus } from "./types";
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD",
                                              maximumFractionDigits: 2 });
@@ -77,4 +77,19 @@ export function marketTime(iso: string | null): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   return `${marketClock.format(date)} ET`;
+}
+
+const opens = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York",
+                                                 weekday: "short", hour: "numeric",
+                                                 minute: "2-digit" });
+
+/** "Live · Market open", "Live · Market closed · opens Mon 9:30 AM ET", or a warning. */
+export function statusText(status: MarketStatus): string {
+  if (!status.live) return "Replayed market";
+  if (status.stale) return "Live prices unavailable · orders paused";
+  if (status.market_open) return `Live · Market open · ${marketTime(status.prices_as_of)}`;
+  const start = status.session_start ? new Date(status.session_start) : null;
+  const now = status.now ? new Date(status.now) : new Date();
+  const next = start && start > now ? ` · opens ${opens.format(start)} ET` : "";
+  return `Live · Market closed${next}`;
 }

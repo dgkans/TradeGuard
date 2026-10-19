@@ -1,4 +1,4 @@
-"""Market overview (F10d): drawn from the replay fixtures, nothing made up."""
+"""Market overview (F10d, F10f): from the live feed, or the replay fixtures; nothing made up."""
 
 from fastapi.testclient import TestClient
 
@@ -26,14 +26,25 @@ def test_overview_has_indices_and_a_watchlist_with_sparklines() -> None:
     assert movers == sorted(movers, key=lambda m: -abs(m["day_change_pct"]))[: len(movers)]
 
 
-def test_overview_follows_the_desk_clock() -> None:
-    from datetime import UTC, datetime
+async def test_overview_uses_live_prices_when_there_is_a_feed() -> None:
     from pathlib import Path
 
+    from services.api.live import LiveFeed
     from services.api.market import overview
+    from tests.api.fake_yahoo import OPEN_MOMENT, Clock, FakeYahoo
 
     root = Path(__file__).resolve().parents[2]
-    start = overview(root, datetime(2026, 10, 1, 14, 30, tzinfo=UTC))
-    later = overview(root, datetime(2026, 10, 2, 15, 0, tzinfo=UTC))
-    assert later["as_of"].startswith("2026-10-02T15:00")
-    assert later["indices"][0]["price"] != start["indices"][0]["price"]  # the market moved
+    clock = Clock(OPEN_MOMENT)
+    yahoo = FakeYahoo(root, clock)
+    feed = LiveFeed(["SPY", "QQQ", "NVDA", "AMD", "AAPL", "MSFT", "TSLA", "AMZN", "META",
+                     "GOOGL"], yahoo, clock=clock)  # fmt: skip
+    await feed.refresh()
+    yahoo.prices["SPY"] = 700.0
+    await feed.refresh()
+    data = overview(root, feed)
+    assert data["live"] is True and data["source"] == "Yahoo Finance"
+    assert data["as_of"] == OPEN_MOMENT.isoformat() and data["market_open"] is True
+    spy = data["indices"][0]
+    assert spy["symbol"] == "SPY" and spy["price"] == 700.0 and spy["spark"][-1] == 700.0
+    assert spy["previous_close"] == feed.previous_close("SPY")
+    assert len(data["watchlist"]) == 8

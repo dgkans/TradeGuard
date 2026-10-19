@@ -98,7 +98,8 @@ export function PositionsPage({ session, pollMs = 3000 }: { session: SessionInfo
         </div>
       </div>
       <p className="muted small">
-        Demo market {book.market_open ? "open" : "closed"} · prices as of {marketTime(book.as_of)}
+        Paper account at live prices · market {book.market_open ? "open" : "closed"} · as of{" "}
+        {marketTime(book.as_of)}
       </p>
       <ErrorNote error={error} />
 

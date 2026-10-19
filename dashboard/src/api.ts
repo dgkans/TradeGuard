@@ -4,16 +4,17 @@ import type {
   Approval,
   AuditFilters,
   AuditPage,
-  DeskClock,
   EvalReport,
   EvalReportRef,
   Limits,
   LimitsView,
   MarketOverview,
+  MarketStatus,
   Me,
   PolicyDetail,
   PolicyRef,
   Portfolio,
+  Role,
   RuleCount,
   Scenario,
   SessionState,
@@ -36,7 +37,8 @@ export class ApiError extends Error {
 export interface Api {
   // --- trader account (F10e) ---
   signup(form: SignupForm): Promise<void>;
-  login(username: string, password: string): Promise<void>;
+  /** Traders, and the owner as `admin` on the same form (F10f). */
+  login(username: string, password: string): Promise<Role>;
   logout(): Promise<void>;
   isTrader(): boolean;
   /** The logged-in trader and their session (opened or restored on demand). */
@@ -53,9 +55,8 @@ export interface Api {
   stopped(): Promise<RuleCount[]>;
   // --- market (public) ---
   marketOverview(): Promise<MarketOverview>;
-  deskClock(): Promise<DeskClock>;
+  marketStatus(): Promise<MarketStatus>;
   // --- admin (owner only) ---
-  adminLogin(password: string): Promise<void>;
   adminLogout(): void;
   isAdmin(): boolean;
   traders(): Promise<AdminTrader[]>;
@@ -172,8 +173,13 @@ export const httpApi: Api = {
     write(local, TRADER_KEY, data.token);
   },
   async login(username, password) {
-    const data = await post<{ token: string }>("/auth/login", { username, password });
-    write(local, TRADER_KEY, data.token);
+    const data = await post<{ token: string; role: Role }>("/auth/login", { username, password });
+    if (data.role === "admin") {
+      write(session, ADMIN_KEY, data.token);
+    } else {
+      write(local, TRADER_KEY, data.token);
+    }
+    return data.role;
   },
   async logout() {
     try {
@@ -199,11 +205,7 @@ export const httpApi: Api = {
     return (await request<{ rules: RuleCount[] }>("/me/stopped")).rules;
   },
   marketOverview: () => request<MarketOverview>("/market/overview"),
-  deskClock: () => request<DeskClock>("/desk/clock"),
-  async adminLogin(password) {
-    const data = await post<{ token: string }>("/admin/login", { password });
-    write(session, ADMIN_KEY, data.token);
-  },
+  marketStatus: () => request<MarketStatus>("/market/status"),
   adminLogout: () => write(session, ADMIN_KEY, null),
   isAdmin: () => read(session, ADMIN_KEY) !== null,
   async traders() {

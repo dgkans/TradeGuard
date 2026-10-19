@@ -1,11 +1,12 @@
-"""Trader accounts and their sessions (F10 to F10e): the real agent graph and the in-process
-connector with a scripted model, in-memory stores, and (where noted) the shared desk clock."""
+"""Trader accounts and their sessions (F10 to F10f): the real agent graph and the in-process
+connector with a scripted model, in-memory stores, and (where noted) live prices from a fake
+Yahoo."""
 
 import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,14 +17,15 @@ from services.api.accounts import MemoryTraderStore, TraderTokens
 from services.api.admin import AdminAuth
 from services.api.app import Accounts, ApiDeps, create_app
 from services.api.chat import ChatService, ChatSpec, GatewayStores, inprocess_connector
-from services.api.desk import DeskClock
+from services.api.limits import universe
+from services.api.live import LiveFeed
 from services.gateway.approvals import MemoryApprovalStore
 from services.gateway.audit import MemoryAuditReader, MemoryAuditSink
 from services.gateway.provenance.store import MemoryProvenanceStore
 from tests.agent.conftest import ScriptedChatModel, answer, plan, tool_call, understand
+from tests.api.fake_yahoo import OPEN_MOMENT, Clock, FakeYahoo
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DESK_START = datetime(2026, 10, 1, 14, 30, tzinfo=UTC)
 
 
 class Stack:
@@ -33,7 +35,7 @@ class Stack:
         self,
         scripts: list[ScriptedChatModel],
         max_sessions: int = 8,
-        clock: DeskClock | None = None,
+        feed: LiveFeed | None = None,
         store: MemoryTraderStore | None = None,
     ) -> None:
         self.audit = MemoryAuditSink()
@@ -42,13 +44,13 @@ class Stack:
         self.store = store or MemoryTraderStore()
         stores = GatewayStores(self.audit, self.approvals, MemoryProvenanceStore())
         self.chat = ChatService(
-            connect=inprocess_connector(REPO_ROOT, lambda: stores, 60),
+            connect=inprocess_connector(REPO_ROOT, lambda: stores, 60, feed),
             models=self.models,
             approval_timeout_s=60,
             max_sessions=max_sessions,
             repo_root=REPO_ROOT,
             poll_seconds=0.05,
-            clock=clock,
+            feed=feed,
             store=self.store,
         )
         self.admin = AdminAuth("test-admin")
@@ -297,29 +299,63 @@ async def test_one_turn_at_a_time() -> None:
     assert second.status_code == 409
 
 
-# --- the shared clock and coming back after a restart ------------------------------------
+# --- live prices (F10f) and coming back after a restart -----------------------------------
 
 
-async def test_the_shared_clock_fills_orders_and_moves_prices_with_no_turn() -> None:
-    clock = DeskClock(REPO_ROOT / "fixtures/bars", DESK_START)
-    stack = Stack([order_script("Sent.", notional=500, symbol="AMD")], clock=clock)
+async def live_feed(at: datetime = OPEN_MOMENT) -> tuple[LiveFeed, FakeYahoo, Clock]:
+    clock = Clock(at)
+    yahoo = FakeYahoo(REPO_ROOT, clock)
+    feed = LiveFeed(universe(), yahoo, clock=clock)
+    await feed.refresh()
+    return feed, yahoo, clock
+
+
+async def test_a_live_market_order_fills_at_the_live_price() -> None:
+    feed, yahoo, _clock = await live_feed()
+    yahoo.prices["AMD"] = 125.0
+    await feed.refresh()
+    stack = Stack([order_script("Sent.", notional=500, symbol="AMD")], feed=feed)
     async with stack.client() as client:
         asha = await signup(client)
         await send(client, asha, "Buy $500 of AMD")
+        book = await get(client, asha, "/me/portfolio")
+    assert book["orders"][0]["status"] == "filled"
+    assert book["positions"] == [{**book["positions"][0], "symbol": "AMD", "qty": 4.0,
+                                  "avg": 125.0, "ltp": 125.0}]  # fmt: skip
+    assert book["cash"] == 9500.0
+    assert book["as_of"] == OPEN_MOMENT.isoformat()
+
+
+async def test_a_limit_order_fills_when_the_live_price_gets_there() -> None:
+    feed, yahoo, clock = await live_feed()
+    yahoo.prices["NVDA"] = 200.0
+    await feed.refresh()
+    script = ScriptedChatModel([
+        understand("trade", "buy 2 shares of NVDA at a 190 limit"), plan(),
+        tool_call("place_order", {"symbol": "NVDA", "side": "buy", "qty": 2,
+                                  "order_type": "limit", "limit_price": 190}),
+        answer("Sent."),
+    ])  # fmt: skip
+    stack = Stack([script], feed=feed)
+    async with stack.client() as client:
+        asha = await signup(client)
+        await send(client, asha, "Buy 2 shares of NVDA at a 190 limit")
         before = await get(client, asha, "/me/portfolio")
-        for _ in range(3):
-            stack.chat.sync(clock.tick() or clock.now)
+        yahoo.prices["NVDA"] = 189.0
+        clock.move(minutes=1)
+        await feed.refresh()
+        changed = stack.chat.settle()  # what the API's poller does after each refresh
         after = await get(client, asha, "/me/portfolio")
-    assert before["orders"][0]["status"] == "new"  # no auto fill with the shared clock
+    assert before["orders"][0]["status"] == "new"
+    assert [s.spec.user for s in changed] == ["asha"]
     assert after["orders"][0]["status"] == "filled"
-    assert after["as_of"] > before["as_of"]
-    assert after["as_of"].startswith("2026-10-01T14:45")
+    assert after["positions"][0]["avg"] == 189.0
 
 
 async def test_an_account_comes_back_identical_after_a_restart() -> None:
     store = MemoryTraderStore()
-    clock = DeskClock(REPO_ROOT / "fixtures/bars", DESK_START)
-    first = Stack([order_script("Sent.", notional=500, symbol="AMD")], clock=clock, store=store)
+    feed, _yahoo, clock = await live_feed()
+    first = Stack([order_script("Sent.", notional=500, symbol="AMD")], feed=feed, store=store)
     async with first.client() as client:
         asha = await signup(client, "asha", starting_cash=50000)
         limits = (await get(client, asha, "/me/limits"))["limits"]
@@ -330,15 +366,13 @@ async def test_an_account_comes_back_identical_after_a_restart() -> None:
         )
         assert changed.status_code == 200
         await send(client, asha, "Buy $500 of AMD")
-        for _ in range(2):
-            first.chat.sync(clock.tick() or clock.now)
         book = await get(client, asha, "/me/portfolio")
         transcript = (await get(client, asha, "/me/session"))["transcript"]
     await first.chat.close_all()  # the API stops
 
-    for _ in range(4):  # the market keeps going while the API is down
-        clock.tick()
-    second = Stack([quote_script()], clock=clock, store=store)  # a new process, same database
+    clock.move(minutes=30)  # the market moves while the API is down
+    await feed.refresh()
+    second = Stack([quote_script()], feed=feed, store=store)  # a new process, same database
     async with second.client() as client:
         login = await client.post("/auth/login", json={"username": "asha",
                                                         "password": "pw-asha-123"})  # fmt: skip
@@ -346,13 +380,30 @@ async def test_an_account_comes_back_identical_after_a_restart() -> None:
         back = await get(client, again, "/me/portfolio")
         back_limits = (await get(client, again, "/me/limits"))["limits"]
         back_transcript = (await get(client, again, "/me/session"))["transcript"]
-    assert [o["id"] for o in back["orders"]] == [o["id"] for o in book["orders"]]
-    assert back["orders"][0]["status"] == "filled"
+    assert back["orders"] == book["orders"]
     assert back["cash"] == book["cash"] == 49500.0
-    assert [p["qty"] for p in back["positions"]] == [p["qty"] for p in book["positions"]]
-    assert back["as_of"] > book["as_of"]  # caught up to the shared clock
+    assert [(p["symbol"], p["qty"], p["avg"]) for p in back["positions"]] == [
+        (p["symbol"], p["qty"], p["avg"]) for p in book["positions"]
+    ]
+    assert back["as_of"] > book["as_of"]  # priced at the latest live price
     assert back_limits["max_order_usd"] == 900
     assert back_transcript == transcript
+
+
+async def test_admin_logs_in_on_the_trader_form() -> None:
+    stack = Stack([])
+    async with stack.client() as client:
+        signed = await client.post("/auth/login", json={"username": "admin",
+                                                         "password": "test-admin"})  # fmt: skip
+        token = signed.json()["token"]
+        listing = await client.get("/admin/traders",
+                                   headers={"authorization": f"Bearer {token}"})  # fmt: skip
+        taken = await client.post("/auth/signup", json={"username": "ADMIN",
+                                                         "password": "long-enough-1"})  # fmt: skip
+        as_trader = await client.get("/me", headers={"x-trader-token": token})
+    assert signed.json()["role"] == "admin" and listing.status_code == 200
+    assert taken.status_code == 409  # nobody can register as admin
+    assert as_trader.status_code == 401  # an admin token is not a trader login
 
 
 # --- limits (F10d), through /me ----------------------------------------------------------

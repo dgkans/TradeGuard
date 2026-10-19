@@ -59,15 +59,14 @@ async def test_memory_store_creates_finds_and_saves_state() -> None:
         await store.create("ASHA", "x", "Asha", "default", 10000)  # case-insensitive
     found = await store.by_username("Asha")
     assert found is not None and found.id == asha.id and found.starting_cash == 25000
-    await store.save_state(asha.id, events=[{"kind": "place"}], transcript=[{"role": "user"}],
+    await store.save_state(asha.id, book={"cash": "9500"}, transcript=[{"role": "user"}],
                            limits={"max_order_usd": 500})  # fmt: skip
     again = await store.by_id(asha.id)
     assert again is not None
-    assert again.events == [{"kind": "place"}] and again.limits == {"max_order_usd": 500}
+    assert again.book == {"cash": "9500"} and again.limits == {"max_order_usd": 500}
     assert [t.username for t in await store.list_all()] == ["asha"]
-    assert await store.get_clock() is None
-    await store.set_clock("2026-10-01T14:35:00+00:00")
-    assert await store.get_clock() == "2026-10-01T14:35:00+00:00"
+    await store.delete(asha.id)
+    assert await store.list_all() == []
 
 
 async def test_postgres_store_round_trip() -> None:
@@ -82,14 +81,20 @@ async def test_postgres_store_round_trip() -> None:
     name = f"pg_{uuid.uuid4().hex[:8]}"
     async with PostgresTraderStore(database_url()) as store:
         trader = await store.create(name, hash_password("pw123456"), "PG", "strict", 50000)
-        with pytest.raises(UsernameTakenError):
-            await store.create(name.upper(), "x", "PG", "default", 10000)
-        events = [{"kind": "cancel", "order_id": "o1"}]
-        transcript = [{"role": "agent", "text": "hi"}]
-        await store.save_state(trader.id, events=events, transcript=transcript, limits=None)
-    async with PostgresTraderStore(database_url()) as store:  # a "restart"
-        back = await store.by_username(name)
-        assert back is not None and back.profile == "strict" and back.starting_cash == 50000
-        assert back.events == [{"kind": "cancel", "order_id": "o1"}]
-        assert back.transcript == [{"role": "agent", "text": "hi"}]
-        assert verify_password("pw123456", back.password_hash)
+    try:
+        async with PostgresTraderStore(database_url()) as store:
+            with pytest.raises(UsernameTakenError):
+                await store.create(name.upper(), "x", "PG", "default", 10000)
+            book = {"cash": "49500", "positions": {}, "orders": []}
+            transcript = [{"role": "agent", "text": "hi"}]
+            await store.save_state(trader.id, book=book, transcript=transcript, limits=None)
+        async with PostgresTraderStore(database_url()) as store:  # a "restart"
+            back = await store.by_username(name)
+            assert back is not None and back.profile == "strict" and back.starting_cash == 50000
+            assert back.book == book
+            assert back.transcript == [{"role": "agent", "text": "hi"}]
+            assert verify_password("pw123456", back.password_hash)
+    finally:
+        async with PostgresTraderStore(database_url()) as store:  # leave no test accounts
+            await store.delete(trader.id)
+            assert await store.by_username(name) is None

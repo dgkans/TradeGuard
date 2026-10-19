@@ -77,7 +77,12 @@ class Settings(BaseModel):
     jaeger_ui_url: str = Field(default="http://localhost:16686", alias="JAEGER_UI_URL")
     admin_password: SecretStr | None = Field(default=None, alias="ADMIN_PASSWORD")
     trader_token_secret: SecretStr | None = Field(default=None, alias="TRADER_TOKEN_SECRET")
-    desk_tick_seconds: float = Field(default=30, ge=1, le=3600, alias="DESK_TICK_SECONDS")
+    # Live prices for the trading desk (F10f): Yahoo Finance, polled politely.
+    live_prices: bool = Field(default=True, alias="LIVE_PRICES")
+    live_poll_seconds: float = Field(default=30, ge=10, le=3600, alias="LIVE_POLL_SECONDS")
+    live_closed_poll_seconds: float = Field(
+        default=300, ge=30, le=3600, alias="LIVE_CLOSED_POLL_SECONDS"
+    )
     paper_watchlist: str = Field(default="NVDA,AMD,AAPL,MSFT,TSLA", alias="PAPER_WATCHLIST")
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(

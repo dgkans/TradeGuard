@@ -19,6 +19,7 @@
 | F10c Desk polish | done | 2026-10-18 |
 | F10d Limits, market view, admin | done | 2026-10-18 |
 | F10e Trader accounts and live replay | done | 2026-10-18 |
+| F10f Live prices, one login form | done | 2026-10-18 |
 | F11 Alpaca paper | deferred by user (adapter built and tested against a stand-in) | |
 | F12 Deployment | not started | |
 | F13 Impact and beta | not started | |
@@ -614,3 +615,41 @@ Work:
 - Evals: none affected (gateway unchanged).
 - Gaps: agent memory across restarts (above); no password reset.
 - Next: F12 Deployment (hosting decision pending).
+
+## F10f Live prices (Yahoo Finance) and one login form (user request 2026-10-18)
+### Plan
+- **Live prices for the trading desk** (user choice: Yahoo Finance, no sign up, no key):
+  - A shared `LiveFeed` polls Yahoo's chart endpoint for the desk's symbols: latest price, 5 minute bars (5 days), daily bars (1 year), and the current regular session (which covers holidays). It also fetches recent headlines.
+  - It sends a plain `tradeguard/0.1` user agent and keeps polling slow and cached (one fetch per symbol per poll, every 30 s by default).
+- **The desk's market becomes a `LiveMarket`** (a ReplaySession with live data). The same MCP tools and guard apply; the guard reads market hours from the live clock.
+  - Orders fill only in TradeGuard's own simulated paper account, never at a real broker. During market hours, market orders fill at the live price; limit orders fill when the live price reaches the limit. Day orders expire at the close.
+  - **Fail closed:** if prices are stale or Yahoo fails, orders are refused with a plain reason and the UI says prices are unavailable.
+- **Real news headlines** from Yahoo replace the demo news on the desk. They are untrusted text, so the taint and intent checks apply to real content.
+- **Accounts are saved as a snapshot** (cash, positions, orders, order id state) instead of a replayed order history, because live prices can't be replayed. The replay clock is removed (migration 0005).
+- **Evals and the eval harness stay on replay data** (reproducible numbers; PLAN 7). Nothing in RESULTS.md changes.
+- **One login form:**
+  - Username `admin` with `ADMIN_PASSWORD` signs in as the owner and shows the admin views. Everyone else signs in as a trader.
+  - The separate Admin button goes away, and `admin` can't be registered.
+- **Tests never touch the network:** a fake Yahoo built from the replay fixtures. The Postgres test cleans up its rows; the leftover test accounts are removed.
+### Acceptance
+- [x] The desk shows live prices, charts and headlines, and orders fill against live prices in the paper account, only while the market is open (tested with a fake Yahoo: market and limit fills, waiting while closed, expiry; live: real Friday-close prices and day change, NVDA $214.13 -1.43%, and a buy on Sunday blocked with "the market is closed")
+- [x] Stale or missing prices refuse orders (tested; 429 back off tested)
+- [x] An API restart keeps a trader's cash, positions and orders (tested; live: limits and chat came back after a restart)
+- [x] `admin` plus the admin password, on the normal login form, opens the admin views; traders never see them (tested; live: admin 200, a trader token on /admin/traders 401)
+- [x] Evals unchanged: replay smoke identical (only the date and commit lines differ)
+### Notes and open questions
+- Today is Sunday: a live fill couldn't be shown end to end against real prices. Fills are covered by tests against the fake Yahoo; the first real fill happens after Monday's 9:30 ET open.
+- The agent's own sentence on the blocked weekend order said "during market hours" (should be "outside"); the guard's reason and the step line were correct. That's model wording.
+- Tests left 4 `pg_…` accounts in the dev database; the Postgres test now deletes its account, and the leftovers (plus my two check accounts) were removed. The database has no accounts now.
+- Yahoo's endpoint is unofficial (D023): fine for local use, not for a public deployment.
+### Loop summary
+- Built:
+  - Live prices from Yahoo Finance (shared feed, polite polling, fail closed).
+  - A live paper market behind the same tools and guard, with real headlines.
+  - Snapshot accounts (migration 0005).
+  - One login form for traders and the admin.
+  - A live market badge, and test cleanup.
+- Tests: Python 477 passing, 1 skipped (`make check` clean); Vitest 50 passing; build OK; replay smoke unchanged.
+- Evals: none affected (evals stay on replay).
+- Gaps: agent memory across restarts; the Yahoo data source isn't licensed for public use.
+- Next: F12 Deployment (hosting decision pending; it needs a licensed data source if public).

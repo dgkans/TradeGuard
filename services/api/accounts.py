@@ -1,9 +1,11 @@
-"""Trader accounts (F10e): passwords, login tokens, lockout, and the account store.
+"""Trader accounts (F10e, F10f): passwords, login tokens, lockout, and the account store.
 
 Passwords are hashed with scrypt from the standard library (n=2^14, r=8, p=1, 16 byte
 salt) and checked in constant time. Login tokens are `<trader id>.<expiry ms>.<HMAC>`,
 signed with TRADER_TOKEN_SECRET, so they survive restarts but can't be forged or moved to
-another trader. A username is locked for a while after repeated wrong passwords.
+another trader. A username is locked for a while after repeated wrong passwords. Each
+account's book (cash, positions, orders) is saved as a snapshot (F10f: live prices can't
+be replayed).
 """
 
 import asyncio
@@ -112,7 +114,7 @@ class Trader:
     profile: str
     starting_cash: float
     limits: dict[str, Any] | None = None
-    events: list[dict[str, Any]] = field(default_factory=list)
+    book: dict[str, Any] | None = None
     transcript: list[dict[str, Any]] = field(default_factory=list)
 
     def public(self) -> dict[str, Any]:
@@ -130,13 +132,11 @@ class TraderStore(Protocol):
 
     async def list_all(self) -> list[Trader]: ...
 
-    async def save_state(self, trader_id: int, *, events: list[dict[str, Any]],
+    async def save_state(self, trader_id: int, *, book: dict[str, Any] | None,
                          transcript: list[dict[str, Any]],
                          limits: dict[str, Any] | None) -> None: ...  # fmt: skip
 
-    async def get_clock(self) -> str | None: ...
-
-    async def set_clock(self, iso: str) -> None: ...
+    async def delete(self, trader_id: int) -> None: ...
 
 
 class MemoryTraderStore:
@@ -144,7 +144,6 @@ class MemoryTraderStore:
 
     def __init__(self) -> None:
         self._traders: dict[int, Trader] = {}
-        self._clock: str | None = None
 
     async def create(self, username: str, password_hash: str, display_name: str,
                      profile: str, starting_cash: float) -> Trader:  # fmt: skip
@@ -169,32 +168,29 @@ class MemoryTraderStore:
     async def list_all(self) -> list[Trader]:
         return sorted(self._traders.values(), key=lambda trader: trader.id)
 
-    async def save_state(self, trader_id: int, *, events: list[dict[str, Any]],
+    async def save_state(self, trader_id: int, *, book: dict[str, Any] | None,
                          transcript: list[dict[str, Any]],
                          limits: dict[str, Any] | None) -> None:  # fmt: skip
         trader = self._traders[trader_id]
-        trader.events = json.loads(json.dumps(events, default=str))
+        trader.book = json.loads(json.dumps(book, default=str)) if book is not None else None
         trader.transcript = json.loads(json.dumps(transcript, default=str))
         trader.limits = limits
 
-    async def get_clock(self) -> str | None:
-        return self._clock
-
-    async def set_clock(self, iso: str) -> None:
-        self._clock = iso
+    async def delete(self, trader_id: int) -> None:
+        self._traders.pop(trader_id, None)
 
 
 COLUMNS = ("id, username, display_name, password_hash, profile, starting_cash, limits, "
-           "events, transcript")  # fmt: skip
+           "book, transcript")  # fmt: skip
 
 
 def _row(row: tuple[Any, ...]) -> Trader:
     return Trader(int(row[0]), row[1], row[2], row[3], row[4], float(row[5]), row[6],
-                  list(row[7] or []), list(row[8] or []))  # fmt: skip
+                  row[7], list(row[8] or []))  # fmt: skip
 
 
 class PostgresTraderStore:
-    """`traders` and `desk_state` tables (migration 0004). Owns one connection."""
+    """The `traders` table (migrations 0004, 0005). Owns one connection."""
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -253,25 +249,17 @@ class PostgresTraderStore:
             rows = await cursor.fetchall()
         return [_row(row) for row in rows]
 
-    async def save_state(self, trader_id: int, *, events: list[dict[str, Any]],
+    async def save_state(self, trader_id: int, *, book: dict[str, Any] | None,
                          transcript: list[dict[str, Any]],
                          limits: dict[str, Any] | None) -> None:  # fmt: skip
         async with self._lock:
             await self._connection().execute(
-                "update traders set events = %s, transcript = %s, limits = %s where id = %s",
-                (Jsonb(json.loads(json.dumps(events, default=str))),
+                "update traders set book = %s, transcript = %s, limits = %s where id = %s",
+                (Jsonb(json.loads(json.dumps(book, default=str))) if book is not None else None,
                  Jsonb(json.loads(json.dumps(transcript, default=str))),
                  Jsonb(limits) if limits is not None else None, trader_id),
             )  # fmt: skip
 
-    async def get_clock(self) -> str | None:
-        row = await self._one("select value from desk_state where key = 'clock'", ())
-        return str(row[0]) if row else None
-
-    async def set_clock(self, iso: str) -> None:
+    async def delete(self, trader_id: int) -> None:
         async with self._lock:
-            await self._connection().execute(
-                "insert into desk_state (key, value) values ('clock', %s) on conflict (key) "
-                "do update set value = excluded.value, updated_at = now()",
-                (iso,),
-            )
+            await self._connection().execute("delete from traders where id = %s", (trader_id,))

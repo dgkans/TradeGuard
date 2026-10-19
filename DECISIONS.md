@@ -621,3 +621,44 @@ Alternatives considered:
 Consequences: agent memory (LangGraph checkpointer) is still in memory, so the agent
 forgets earlier turns after a restart even though the visible chat is restored. There is
 no password reset; the admin can see accounts but not passwords.
+
+## D023: Live prices from Yahoo Finance, and one login form (F10f)
+Date: 2026-10-18
+Decision:
+- **The trading desk uses live prices** (user request; user chose Yahoo Finance).
+  - One shared `LiveFeed` polls Yahoo's public chart endpoint per symbol: latest price,
+    5 minute bars (5 days), daily bars (1 year, every 30 minutes), the current regular
+    session, and headlines every 10 minutes.
+  - It sends a plain `tradeguard/0.1` user agent. In testing, a browser-like agent got
+    429 while a plain one didn't.
+  - It polls every 30 s while the market is open and every 5 minutes while closed, and
+    backs off for 2 minutes after a 429.
+- **A `LiveMarket` is the replay broker with live data**, so the MCP tools, the cash
+  account rules and the whole guard are unchanged. The guard learns market hours from the
+  market's clock tool, which now follows Yahoo's session times (holidays included).
+  - Market orders fill at the live price while the market is open; limit orders fill when
+    the price reaches the limit; day orders expire at the close.
+  - Orders never leave TradeGuard: this is paper trading, not live trading.
+  - **Fail closed:** stale prices (no successful poll for 3 minutes) refuse new orders, and
+    an unknown session counts as closed.
+- **Real headlines** replace the demo news on the desk, as untrusted text. Taint and intent
+  checks now see real content.
+- **Accounts are snapshots** (cash, positions, orders), not order histories. Live prices
+  can't be replayed (migration 0005 drops `events` and the replay clock).
+- **One login form:** username `admin` with `ADMIN_PASSWORD` signs in as the owner and
+  returns an admin token. Nobody can register `admin`. A wrong admin password gets the same
+  answer as a wrong trader password, and the separate admin route is gone.
+- **Evals stay on replay data**, for reproducible numbers (PLAN 7). RESULTS.md is
+  unchanged.
+Alternatives considered:
+- Finnhub (official, needs an email sign up for a key).
+- Alpaca market data (needs an Alpaca account; the user declined sign ups).
+- The `yfinance` package: heavier, scrapes more endpoints, and uses the same unofficial
+  data.
+- Filling market orders at the next 5 minute bar's open, as in replay: correct for replay,
+  but slow and odd with a live price on screen.
+Consequences:
+- Yahoo's endpoint is unofficial: it can change or rate limit without notice, and its
+  terms don't allow redistribution. That's fine for a local demo; a public deployment
+  needs a licensed data source (F12).
+- Desk numbers aren't reproducible, by design; eval numbers still are.

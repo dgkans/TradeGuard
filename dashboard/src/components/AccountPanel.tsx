@@ -1,15 +1,16 @@
 import { useId, useState, type FormEvent } from "react";
 import { useApi } from "../api";
 import { money } from "../format";
-import type { Me } from "../types";
+import type { Me, Role } from "../types";
 import { ErrorNote } from "./common";
 
 const MIN_CASH = 1000;
 const MAX_CASH = 1_000_000;
 
-/** Left panel: log in or sign up when signed out; the account card when signed in. */
-export function AccountPanel({ me, onAuthed, onLoggedOut }: {
-  me: Me | null; onAuthed: () => void; onLoggedOut: () => void;
+/** Left panel: log in or sign up when signed out; the account card when signed in. The
+ * owner logs in here too, as `admin` (F10f). */
+export function AccountPanel({ me, admin = false, onAuthed, onLoggedOut }: {
+  me: Me | null; admin?: boolean; onAuthed: (role: Role) => void; onLoggedOut: () => void;
 }) {
   const api = useApi();
   const [mode, setMode] = useState<"login" | "signup">("login");
@@ -24,6 +25,25 @@ export function AccountPanel({ me, onAuthed, onLoggedOut }: {
                 hint: useId() };
   const cashValue = Number(cash);
   const cashOk = Number.isFinite(cashValue) && cashValue >= MIN_CASH && cashValue <= MAX_CASH;
+
+  if (admin) {
+    return (
+      <aside className="trader-bar account">
+        <h2>Signed in</h2>
+        <div className="account-card">
+          <strong className="account-name">Admin</strong>
+          <span className="muted small">Owner view: every trader, approval and check</span>
+          <button type="button" className="button button-quiet"
+                  onClick={() => {
+                    api.adminLogout();
+                    onLoggedOut();
+                  }}>
+            Log out
+          </button>
+        </div>
+      </aside>
+    );
+  }
 
   if (me) {
     const trader = me.trader;
@@ -61,14 +81,15 @@ export function AccountPanel({ me, onAuthed, onLoggedOut }: {
     setBusy(true);
     setError(null);
     try {
+      let role: Role = "trader";
       if (mode === "login") {
-        await api.login(username.trim(), password);
+        role = await api.login(username.trim(), password);
       } else {
         await api.signup({ username: username.trim(), password, starting_cash: cashValue,
                            profile, display_name: display.trim() || undefined });
       }
       setPassword("");
-      onAuthed();
+      onAuthed(role);
     } catch (failure) {
       setError(failure);
     } finally {

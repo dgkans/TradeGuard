@@ -211,7 +211,7 @@ Reports (Markdown and JSON) go to `evals/reports/`. Every number quoted in this 
 comes from [RESULTS.md](RESULTS.md), which records the date, commit and models. All news
 in the scenarios is synthetic (see `fixtures/news/README.md`).
 
-## Dashboard: trading desk and operator console (F10 to F10e)
+## Dashboard: trading desk and operator console (F10 to F10f)
 
 React + TypeScript (strict) dashboard over the TradeGuard API. Needs Node 22 (20.19+).
 
@@ -247,9 +247,10 @@ make dashboard-check     # eslint (no `any`), tsc, vitest, production build
   always on.
 - **Market view:** the landing page shows index and watchlist cards with sparklines and a
   top movers chart. A market watch panel sits beside the chat, and an allocation donut on
-  Positions. All of it is drawn from the replay data and the trader's account.
+  Positions. All of it is drawn from live prices and the trader's account.
 
-**Admin** (the owner only; `ADMIN_PASSWORD` in `.env`): **Traders** (every account and
+**Admin** (the owner only): log in on the same form with username `admin` and the
+`ADMIN_PASSWORD` from `.env`. The owner gets **Traders** (every account and
 who is online), **Approvals** (every trader), **Audit log**, **Guard activity** (what was stopped across traders, and the policy
 files), and **Test results**. The API refuses these without the admin token. Tokens are
 HMAC signed, expire after 12 hours, and die when the API restarts; repeated wrong
@@ -258,12 +259,22 @@ passwords lock the login for 5 minutes. Traders approve only their own orders, i
 The **How it works** button explains the flow (You → AI agent → TradeGuard → Broker) with
 a worked example, and how a broker plugs it in.
 
-**Live replayed market (F10e):** one shared clock replays real past 5 minute bars,
-starting Thu 1 Oct 2026, 10:30 New York time. It moves 5 market minutes every
-`DESK_TICK_SECONDS` (default 30), skips nights and weekends, and stops at the end of the
-data (16 Oct 2026). Prices, charts, fills and P&L move on their own. The header shows the
-replayed time, and the clock's position survives restarts. Each trader's market and
-guard run inside the API process, which binds to 127.0.0.1.
+**Live prices (F10f):** the desk is priced from Yahoo Finance's public chart data. There is
+no account and no key. The API polls each symbol every `LIVE_POLL_SECONDS` (default 30)
+while the market is open, and every 5 minutes while it's closed. The data comes with a
+plain user agent and backs off on rate limits.
+- Prices, sparklines, day change, P&L and the agent's tools (quotes, bars, patterns, real
+  headlines as untrusted news) all use it.
+- Orders fill only in TradeGuard's own simulated paper account, never at a real broker.
+  During market hours a market order fills at the live price, and a limit order fills when
+  the price reaches it.
+- Outside market hours the guard blocks orders. The header shows "Live · Market closed ·
+  opens Mon 9:30 AM ET", using Yahoo's own session times, which include holidays.
+- If prices go stale, orders are refused and the header says so (fail closed).
+- `LIVE_PRICES=false` switches the desk back to the replay fixtures.
+- The eval harness always uses replay data, so its numbers stay reproducible.
+
+Each trader's market and guard run inside the API process, which binds to 127.0.0.1.
 
 ### Two minute walkthrough
 
@@ -272,8 +283,10 @@ http://127.0.0.1:5173.
 
 1. **Sign up (10 s).** Open **Sign up**, choose a username (e.g. asha) and a password,
    keep Standard and $10,000, then press **Create account**. Positions are empty.
-2. **Ask and trade (40 s).** Tap the "What is NVDA at?" suggestion, then send
-   "Buy $500 of AMD". Each step appears as a line, then the agent's answer.
+2. **Ask and trade (40 s).** Tap the "What is NVDA at?" suggestion (a live price), then
+   send "Buy $500 of AMD". Each step appears as a line, then the agent's answer. Orders
+   need the market to be open (9:30 to 16:00 New York time on trading days); outside
+   those hours they are blocked with "the market is closed".
 3. **A blocked order (20 s).** Send "Buy $3000 of TSLA". A red notice says **Order is over
    your per-order limit**, with the reason.
 4. **An approval (30 s).** Send "Buy $1500 of NVDA". An approval card appears ("Large order:
@@ -282,11 +295,17 @@ http://127.0.0.1:5173.
    P&L and day change.
 6. **A second trader (20 s).** **Log out**, sign up "ben" with the **Strict** profile in
    another browser (or after logging out), and trade. Positions stay separate.
-7. **Restart (20 s).** Stop and start `make api`, then log in again: positions, limits and
-   chat are still there, and the market clock continues.
-8. **Admin (15 s).** Press **Admin** and enter `ADMIN_PASSWORD` from `.env`. **Traders**
-   lists accounts, **Approvals** covers every trader, and **Audit log** shows every check
-   with a Trace link.
+7. **Restart (20 s).** Stop and start `make api`, then log in again: positions, orders,
+   limits and chat are still there.
+8. **Admin (15 s).** Log out, then log in with username `admin` and `ADMIN_PASSWORD` from
+   `.env`. **Traders** lists accounts, **Approvals** covers every trader, and **Audit log**
+   shows every check with a Trace link.
+
+**The database:** Postgres 16 from Homebrew (`brew services start postgresql@16`), database,
+user and password `tradeguard` on localhost:5432 (`DATABASE_URL` in `.env`). `make migrate`
+creates the tables. Open it with
+`psql "postgresql://tradeguard:tradeguard@localhost:5432/tradeguard"`; accounts are in
+`traders`, decisions in `audit_events` and `approvals`.
 
 ## Alpaca paper trading (F11)
 

@@ -1,30 +1,35 @@
-"""Market overview for the landing page and the chat side panel (F10d).
+"""Market overview for the landing page and the chat side panel (F10d, F10f).
 
-Everything comes from the replay fixtures at the desk scenario's start time: prices,
-day change against the prior close, and 5 minute closes for sparklines. Nothing is made
-up, and nothing after the market's "now" is shown.
+With the live feed (F10f) everything comes from Yahoo Finance's latest prices and bars;
+without it (tests, no network) from the replay fixtures at the desk scenario's start time.
+Prices, day change against the prior close, and 5 minute closes for sparklines. Nothing
+is made up.
 """
 
-from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from services.api.live import SOURCE, LiveFeed, LiveMarket
 from services.replay_server.scenario import load_scenario
 from services.replay_server.session import ReplaySession
 
 INDICES = ["SPY", "QQQ"]
+EXTRA = ["AMZN", "META", "GOOGL"]
 SPARK_BARS = 96  # about the prior session (78 bars) and today so far
 
 
 def summary(market: ReplaySession, symbol: str) -> dict[str, Any] | None:
     try:
         price = float(market.get_quote(symbol)["price"])
-        daily = market.get_bars(symbol, "1d", 1)["bars"]
         intraday = market.get_bars(symbol, "5m", SPARK_BARS)["bars"]
+        if isinstance(market, LiveMarket):
+            previous = market.previous_close(symbol)
+        else:
+            daily = market.get_bars(symbol, "1d", 1)["bars"]
+            previous = float(daily[-1]["close"]) if daily else None
     except Exception:  # a symbol without data is left out, not invented
         return None
-    previous = float(daily[-1]["close"]) if daily else None
     spark = []
     for bar in intraday:
         spark.append(round(float(bar["close"]), 2))
@@ -39,30 +44,39 @@ def summary(market: ReplaySession, symbol: str) -> dict[str, Any] | None:
     }
 
 
-@lru_cache(maxsize=4)
-def overview(root: Path, at: datetime | None = None, scenario_id: str = "desk") -> dict[str, Any]:
-    """Indices, the scenario's watchlist plus a few more stocks, and top movers, at `at`
-    (the shared desk clock, F10e) or at the scenario's start time."""
-    from services.api.book import catch_up
-
-    scenario = load_scenario(scenario_id, root / "scenarios")
-    market = ReplaySession(scenario, bars_root=root / "fixtures/bars",
-                           news_root=root / "fixtures/news")  # fmt: skip
-    if at is not None:
-        catch_up(market, at)
-    extra = ["AMZN", "META", "GOOGL"]
+def _build(market: ReplaySession, watchlist: list[str]) -> dict[str, Any]:
     symbols = []
-    for symbol in [*scenario.watchlist, *extra]:
+    for symbol in [*watchlist, *EXTRA]:
         if symbol not in symbols and symbol not in INDICES:
             symbols.append(symbol)
     indices = [item for item in (summary(market, s) for s in INDICES) if item]
-    watchlist = [item for item in (summary(market, s) for s in symbols) if item]
-    movers = sorted(watchlist, key=lambda item: -abs(item["day_change_pct"]))[:6]
+    listed = [item for item in (summary(market, s) for s in symbols) if item]
+    movers = sorted(listed, key=lambda item: -abs(item["day_change_pct"]))[:6]
     clock = market.get_clock()
     return {
         "as_of": clock["now"],
         "market_open": clock["market_open"],
         "indices": indices,
-        "watchlist": watchlist,
+        "watchlist": listed,
         "movers": [{"symbol": m["symbol"], "day_change_pct": m["day_change_pct"]} for m in movers],
     }
+
+
+def overview(root: Path, feed: LiveFeed | None = None, scenario_id: str = "desk") -> dict[str, Any]:
+    """Indices, the scenario's watchlist plus a few more stocks, and top movers."""
+    if feed is None:
+        return _replay_overview(root, scenario_id)
+    scenario = load_scenario(scenario_id, root / "scenarios")
+    data = _build(LiveMarket(scenario, feed, cash=0), scenario.watchlist)
+    times = [item.at for item in (feed.quote(s) for s in feed.symbols) if item is not None]
+    return {**data, "live": True, "source": SOURCE,
+            "prices_as_of": max(times).isoformat() if times else None}  # fmt: skip
+
+
+@lru_cache(maxsize=2)
+def _replay_overview(root: Path, scenario_id: str) -> dict[str, Any]:
+    scenario = load_scenario(scenario_id, root / "scenarios")
+    market = ReplaySession(scenario, bars_root=root / "fixtures/bars",
+                           news_root=root / "fixtures/news")  # fmt: skip
+    return {**_build(market, scenario.watchlist), "live": False, "source": "replay",
+            "prices_as_of": None}  # fmt: skip

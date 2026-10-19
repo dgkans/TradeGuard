@@ -5,10 +5,11 @@ connection (the MCP client must be opened and closed in the same task). HTTP req
 never touch it directly; they hand the session a job and wait for the result. One turn
 runs at a time per session; different traders' sessions run side by side.
 
-Replay sessions run their market and their gateway inside the API process (F10b): no
-subprocesses per trader. After each turn the session's market moves forward 5 minutes, so
-orders fill without a clock button. Sessions live in this process only (in-memory
-checkpointer) and end when the API stops.
+Sessions run their market and their gateway inside the API process (F10b): no
+subprocesses per trader. A trader's desk market is priced live (F10f, services/api/live.py)
+and fills on its own; a replay market (tests, admin sessions) moves forward 5 minutes after
+a turn so orders fill without a clock button. Agent memory is per process (in-memory
+checkpointer); the account itself is saved (F10e).
 """
 
 import asyncio
@@ -33,15 +34,14 @@ from services.agent.provenance import report_user_message
 from services.agent.tools import McpToolset, ToolCallLog
 from services.api import catalog
 from services.api.accounts import TraderStore
-from services.api.book import RecordingMarket, catch_up, replay
 from services.api.describe import (
     RULE_TITLES,
     describe_decision,
     describe_step,
     friendly_reason,
 )
-from services.api.desk import DeskClock
 from services.api.limits import LOCKED, Limits, limits_of, universe, with_limits
+from services.api.live import LiveFeed, LiveMarket
 from services.common.config import Settings, child_env
 from services.common.llm import make_chat_model
 from services.gateway.audit import DecisionRecord
@@ -55,10 +55,9 @@ FILL_MINUTES = 5
 # Trader sessions only: the CLI and the evals keep the plain system prompt.
 TRADER_STYLE = (
     "This chat is shown to a retail trader in an app. Answer in short, plain sentences. "
-    "Never show order ids, tool names, JSON or field names. Market orders fill within a "
-    "few minutes, so after placing one say it was sent, not filled, unless get_positions "
-    "or list_orders shows it filled. Only state positions, cash or P&L you just read with "
-    "a tool."
+    "Never show order ids, tool names, JSON or field names. After placing an order, say "
+    "filled only if the order's status says filled; otherwise say it was sent and is "
+    "waiting. Only state positions, cash or P&L you just read with a tool."
 )
 
 
@@ -215,9 +214,9 @@ class ChatSession:
         return self._toolset
 
     def _let_orders_fill(self) -> None:
-        """Without the shared desk clock (tests, CLI), the market moves on after a turn so
-        open orders can fill. With the clock (F10e) the clock moves every market."""
-        if self.market is None or self.service.clock is not None:
+        """A replay market moves on after a turn so open orders can fill. A live market
+        (F10f) fills on its own."""
+        if self.market is None or getattr(self.market, "live", False):
             return
         open_orders = self.market.list_orders("open")["orders"]
         if open_orders:
@@ -393,16 +392,14 @@ class ChatSession:
         return self.limits()
 
     def restore(self, trader: Any) -> None:
-        """Bring back a saved account: order history, limits and the conversation."""
-        if isinstance(self.market, RecordingMarket) and trader.events:
-            replay(self.market, trader.events)
+        """Bring back a saved account: the book, limits and the conversation."""
+        if trader.book and isinstance(self.market, LiveMarket):
+            self.market.load(trader.book)
         if trader.limits and self.gateway is not None:
             limits = Limits(**trader.limits)
             self.gateway.update_policy(with_limits(self._policy(), limits, self.spec.user))
             self.custom_limits = limits.model_dump()
         self.transcript = list(trader.transcript)
-        if self.service.clock is not None and self.market is not None:
-            catch_up(self.market, self.service.clock.now)
 
     def _policy(self) -> Policy:
         if self.gateway is None or self.gateway.policy is None:
@@ -439,6 +436,8 @@ class ChatSession:
 
 def previous_close(market: Any, symbol: str) -> float | None:
     """Close of the last full trading day before now (for the day change column)."""
+    if isinstance(market, LiveMarket):
+        return market.previous_close(symbol)
     try:
         bars = market.get_bars(symbol, "1d", 1)["bars"]
     except Exception:  # a symbol without daily bars simply has no day change
@@ -460,7 +459,7 @@ class ChatService:
         poll_seconds: float = 0.5,
         model_name: str = "",
         paper_watchlist: list[str] | None = None,
-        clock: DeskClock | None = None,
+        feed: LiveFeed | None = None,
         store: TraderStore | None = None,
     ) -> None:
         self.connect = connect
@@ -472,7 +471,7 @@ class ChatService:
         self.poll_seconds = poll_seconds
         self.model_name = model_name
         self.paper_watchlist = paper_watchlist
-        self.clock = clock
+        self.feed = feed
         self.store = store
         self.sessions: dict[str, ChatSession] = {}
         self._opening: dict[int, asyncio.Lock] = {}
@@ -499,19 +498,22 @@ class ChatService:
             self.sessions[session_id] = session
             return session
 
-    def sync(self, now: datetime) -> None:
-        """Move every open market to the shared desk time (fills and prices follow)."""
+    def settle(self) -> list[ChatSession]:
+        """Fill or expire open orders in every live market at the latest prices. Returns the
+        sessions whose book changed (to be saved)."""
+        changed = []
         for session in self.sessions.values():
-            if session.market is not None:
-                catch_up(session.market, now)
+            if isinstance(session.market, LiveMarket) and session.market.settle():
+                changed.append(session)
+        return changed
 
     async def persist(self, session: ChatSession) -> None:
-        """Save a trader's account (order history, limits, conversation)."""
+        """Save a trader's account (book, limits, conversation)."""
         trader_id = session.spec.trader_id
         if self.store is None or trader_id is None:
             return
-        events = list(getattr(session.market, "events", []) or [])
-        await self.store.save_state(trader_id, events=events, transcript=session.transcript,
+        book = session.market.snapshot() if isinstance(session.market, LiveMarket) else None
+        await self.store.save_state(trader_id, book=book, transcript=session.transcript,
                                     limits=session.custom_limits)  # fmt: skip
 
     def paper_entry(self) -> dict[str, Any] | None:
@@ -591,13 +593,18 @@ class GatewayStores:
 
 
 def inprocess_connector(
-    repo_root: Path, stores: Callable[[], GatewayStores], approval_timeout_s: float
+    repo_root: Path,
+    stores: Callable[[], GatewayStores],
+    approval_timeout_s: float,
+    feed: LiveFeed | None = None,
 ) -> Connector:
-    """Replay sessions with their market and gateway inside this process (F10b)."""
+    """Sessions with their market and gateway inside this process (F10b). With a feed, a
+    trader's desk market is priced live (F10f); otherwise it replays the fixtures."""
     from services.gateway.mcp_proxy.proxy import Gateway, Upstream
     from services.gateway.policy.model import load_policy
     from services.replay_server.scenario import load_scenario
     from services.replay_server.server import build_server
+    from services.replay_server.session import ReplaySession
 
     paper = stdio_connector(repo_root)
 
@@ -607,18 +614,15 @@ def inprocess_connector(
             async with paper(spec, session_id, token) as connection:
                 yield connection
             return
-        # A new trader's account: the cash they chose and no positions (F10c), a broker seed
-        # of their own (F10e), recording its orders so it can be rebuilt after a restart.
+        # A new trader's account: the cash they chose and no positions (F10c).
         update: dict[str, Any] = {"starting_cash": spec.starting_cash, "positions": {}}
-        if spec.trader_id is not None:
-            update["seed"] = 100_000 + spec.trader_id
         scenario = load_scenario(spec.scenario, repo_root / "scenarios").model_copy(update=update)
-        market = RecordingMarket(
-            scenario,
-            bars_root=repo_root / "fixtures/bars",
-            news_root=repo_root / "fixtures/news",
-        )
-        market.start_recording()
+        market: ReplaySession
+        if feed is not None and spec.trader_id is not None and spec.scenario == DEFAULT_SCENARIO:
+            market = LiveMarket(scenario, feed, cash=spec.starting_cash)
+        else:
+            market = ReplaySession(scenario, bars_root=repo_root / "fixtures/bars",
+                                   news_root=repo_root / "fixtures/news")  # fmt: skip
         upstream = build_server(market, dev_tools=True)
         if not spec.guarded:
             yield Connection(upstream, market)

@@ -33,7 +33,7 @@ describe("AccountPanel", () => {
       username: "ravi", password: "a-long-password", starting_cash: 250000, profile: "strict",
       display_name: undefined,
     });
-    expect(onAuthed).toHaveBeenCalled();
+    expect(onAuthed).toHaveBeenCalledWith("trader");
   });
 
   it("won't sign up with cash outside $1,000 to $1,000,000", async () => {
@@ -46,6 +46,28 @@ describe("AccountPanel", () => {
     await userEvent.type(cash, "2000000");
     expect(cash).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByRole("button", { name: /create account/i })).toBeDisabled();
+  });
+
+  it("tells the app whether a trader or the admin logged in", async () => {
+    const { onAuthed } = setup(null, { login: vi.fn(async () => "admin" as const) });
+    await userEvent.type(screen.getByLabelText(/username/i), "admin");
+    await userEvent.type(screen.getByLabelText(/password/i), "the-owner-password");
+    await userEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+    expect(onAuthed).toHaveBeenCalledWith("admin");
+  });
+
+  it("shows the admin card and logs the admin out", async () => {
+    const api = fakeApi();
+    const onLoggedOut = vi.fn();
+    render(
+      <ApiContext.Provider value={api}>
+        <AccountPanel me={null} admin onAuthed={vi.fn()} onLoggedOut={onLoggedOut} />
+      </ApiContext.Provider>,
+    );
+    expect(screen.getByText("Admin")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /log out/i }));
+    expect(api.adminLogout).toHaveBeenCalled();
+    expect(onLoggedOut).toHaveBeenCalled();
   });
 
   it("shows why a log in failed", async () => {
