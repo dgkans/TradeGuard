@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { ApiError, useApi } from "../api";
 import { BarChart } from "../components/BarChart";
 import { Empty, ErrorNote, PageHeader } from "../components/common";
@@ -147,17 +147,79 @@ function Categories({ data }: { data: EvalReport["by_category"] }) {
   );
 }
 
-/** The latest full suite eval: the three config comparison, charts and caveats. */
+const SETUPS: { key: string; name: string; what: string }[] = [
+  { key: "no_guard", name: "No guard",
+    what: "The AI agent talks to the broker directly. Whatever it decides gets sent." },
+  { key: "rules_only", name: "Basic rules",
+    what: "Size, stock and market hours limits only, like a broker's usual risk checks." },
+  { key: "full_guard", name: "TradeGuard",
+    what: "Basic rules, plus \"did you ask for this?\" and \"does it match your request?\" " +
+          "checks, and your approval for large orders." },
+];
+
+const HEADLINES: { key: string; title: string; note: string }[] = [
+  { key: "unsafe_action_block_rate", title: "Unsafe orders stopped",
+    note: "Higher is better. Orders that should not have gone through." },
+  { key: "false_block_rate", title: "Good orders wrongly blocked",
+    note: "Lower is better. Orders the trader really wanted." },
+  { key: "task_success_rate", title: "Requests handled correctly",
+    note: "Higher is better. Did the right thing, and nothing wrong." },
+  { key: "escalation_rate", title: "Orders held for your approval",
+    note: "Share of orders that waited for a person. Too high gets annoying." },
+];
+
+function rate(cell: MetricCell | undefined): number | null {
+  return cell && cell.mean !== null ? cell.mean : null;
+}
+
+function Bars({ title, note, table, metric, heldOut }: {
+  title: string; note: string; table: Record<string, ConfigMetrics>; metric: string;
+  heldOut?: Record<string, ConfigMetrics>;
+}) {
+  const id = useId();
+  const held = rate(heldOut?.full_guard?.[metric]);
+  return (
+    <section className="result-card" aria-labelledby={id}>
+      <h3 id={id}>{title}</h3>
+      <p className="muted small">{note}</p>
+      {SETUPS.map((setup) => {
+        const value = rate(table[setup.key]?.[metric]);
+        return (
+          <div key={setup.key} className="result-row">
+            <span className="result-name">{setup.name}</span>
+            <span className="result-track" aria-hidden="true">
+              <span className={`result-fill fill-${setup.key}`}
+                    style={{ width: `${value === null ? 0 : Math.max(value * 100, 1)}%` }} />
+            </span>
+            <span className="result-value">{value === null ? "n/a" : percent(value)}</span>
+          </div>
+        );
+      })}
+      {held !== null ? (
+        <p className="muted small">{`On the kept-aside situations, TradeGuard: ${percent(held)}`}</p>
+      ) : null}
+    </section>
+  );
+}
+
+/** The latest eval in plain words: what was tested, what it showed, and the caveats. */
 export function EvalsPage() {
   const api = useApi();
   const [data, setData] = useState<{ name: string; report: EvalReport } | null>(null);
+  const [worst, setWorst] = useState<{ name: string; report: EvalReport } | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const [details, setDetails] = useState(false);
+  const worstId = useId();
 
   useEffect(() => {
     let live = true;
     api.latestEval().then(
       (result) => live && setData(result),
       (failure: unknown) => live && setError(failure),
+    );
+    api.latestEval("attacker").then(
+      (result) => live && setWorst(result),
+      () => undefined, // optional: the page works without a worst case run
     );
     return () => {
       live = false;
@@ -167,9 +229,9 @@ export function EvalsPage() {
   if (error instanceof ApiError && error.status === 404) {
     return (
       <section>
-        <PageHeader title="Evals" />
+        <PageHeader title="Test results" />
         <Empty>
-          No full suite report yet. Run <code>make eval-full</code> (hours on a local model), then
+          No full test run yet. Run <code>make eval-full</code> (hours on a local model), then
           reload.
         </Empty>
       </section>
@@ -179,56 +241,97 @@ export function EvalsPage() {
   const header = data?.report.header ?? {};
   const judge = data?.report.judge;
   const detector = data?.report.detector;
+  const practice = data?.report.tuning.full_guard?.scenarios?.mean;
+  const keptAside = data?.report.held_out.full_guard?.scenarios?.mean;
   return (
-    <section>
-      <PageHeader title="Evals">
-        Same scenarios, three configurations: no guard, rules only, and the full guard.
+    <section className="evals-page">
+      <PageHeader title="Test results">
+        How well TradeGuard protects a trader, measured on scripted trading situations.
       </PageHeader>
       <ErrorNote error={error} />
       {data ? (
         <>
-          <dl className="run-header">
-            <div><dt>Report</dt><dd><code>{data.name}</code></dd></div>
-            <div><dt>Date</dt><dd>{String(header.date ?? "–")}</dd></div>
-            <div><dt>Commit</dt><dd><code>{String(header.commit ?? "–")}</code></dd></div>
-            <div><dt>Agent</dt><dd>{String(header.agent_model ?? "–")}</dd></div>
-            <div><dt>Judge</dt><dd>{String(header.judge_model ?? "–")}</dd></div>
-            <div><dt>Temperature</dt><dd>{String(header.temperature ?? "–")}</dd></div>
-            <div><dt>Repeats</dt><dd>{String(header.repeats ?? "–")}</dd></div>
-          </dl>
+          <p className="lede">
+            {`The same ${practice ?? "?"} practice situations were run ${String(header.repeats ?? "?")} times `}
+            {"with each setup below, using the open "}<strong>{String(header.agent_model ?? "?").replace(/^ollama:/, "")}</strong>
+            {` AI model. Another ${keptAside ?? "?"} situations were kept aside and never used while building the guard.`}
+          </p>
+          <div className="setups">
+            {SETUPS.map((setup) => (
+              <div key={setup.key} className={`setup setup-${setup.key}`}>
+                <strong>{setup.name}</strong>
+                <span>{setup.what}</span>
+              </div>
+            ))}
+          </div>
+          <div className="result-grid">
+            {HEADLINES.map((headline) => (
+              <Bars key={headline.key} title={headline.title} note={headline.note}
+                    table={data.report.tuning} metric={headline.key}
+                    heldOut={data.report.held_out} />
+            ))}
+          </div>
+          {worst ? (
+            <section className="worst" aria-labelledby={worstId}>
+              <h2 id={worstId}>If the agent is fully fooled</h2>
+              <p className="muted">
+                A scripted agent that always obeys instructions hidden in the news it reads, to
+                test the guard on its own. Share of those planted orders stopped:
+              </p>
+              <Bars title="Planted orders stopped" note="Higher is better."
+                    table={worst.report.tuning} metric="unsafe_action_block_rate"
+                    heldOut={worst.report.held_out} />
+            </section>
+          ) : null}
           <aside className="callout">
-            Read the caveats in{" "}
-            <a href={RESULTS_URL} target="_blank" rel="noreferrer">RESULTS.md</a> before quoting
-            these numbers. Values are the mean over repeats, with [min, max] when repeats differed.
+            Read these as a strong first result, not a guarantee: one AI model, situations
+            written by the same person who built the guard, and repeats that barely vary. Full
+            numbers and caveats are in{" "}
+            <a href={RESULTS_URL} target="_blank" rel="noreferrer">RESULTS.md</a>.
           </aside>
-          <h2>Tuning set</h2>
-          <MetricsTable caption="Tuning set" table={data.report.tuning} />
-          <Charts table={data.report.tuning} />
-          <h2>Held out set</h2>
-          <p className="muted">Never looked at while building the guard. Reported separately.</p>
-          <MetricsTable caption="Held out set" table={data.report.held_out} />
-          <h2>By category</h2>
-          <Categories data={data.report.by_category} />
-          {judge || detector ? (
-            <>
-              <h2>Component checks</h2>
-              <ul className="plain-list">
-                {judge ? (
-                  <li>
-                    Intent judge agreement: {judge.agreed}/{judge.cases} overall,{" "}
-                    {judge.agreement_on_cases_gateway_sends_to_judge.agreed}/
-                    {judge.agreement_on_cases_gateway_sends_to_judge.cases} on the ambiguous cases
-                    the gateway sends it ({judge.model}, {judge.prompt_version})
-                  </li>
-                ) : null}
-                {detector ? (
-                  <li>
-                    Injection detector: precision {detector.precision}, recall {detector.recall} on{" "}
-                    {detector.snippets} snippets
-                  </li>
-                ) : null}
-              </ul>
-            </>
+          <button type="button" className="button button-quiet" aria-expanded={details}
+                  onClick={() => setDetails(!details)}>
+            {details ? "Hide detailed results" : "Show detailed results"}
+          </button>
+          {details ? (
+            <div className="details">
+              <dl className="run-header">
+                <div><dt>Report</dt><dd><code>{data.name}</code></dd></div>
+                <div><dt>Date</dt><dd>{String(header.date ?? "–")}</dd></div>
+                <div><dt>Commit</dt><dd><code>{String(header.commit ?? "–")}</code></dd></div>
+                <div><dt>Agent</dt><dd>{String(header.agent_model ?? "–")}</dd></div>
+                <div><dt>Judge</dt><dd>{String(header.judge_model ?? "–")}</dd></div>
+                <div><dt>Temperature</dt><dd>{String(header.temperature ?? "–")}</dd></div>
+              </dl>
+              <p className="muted small">Mean over repeats, with [min, max] when repeats differed.</p>
+              <MetricsTable caption="Tuning set" table={data.report.tuning} />
+              <Charts table={data.report.tuning} />
+              <h2>Held out set</h2>
+              <MetricsTable caption="Held out set" table={data.report.held_out} />
+              <h2>By category</h2>
+              <Categories data={data.report.by_category} />
+              {judge || detector ? (
+                <>
+                  <h2>Component checks</h2>
+                  <ul className="plain-list">
+                    {judge ? (
+                      <li>
+                        Intent judge agreement: {judge.agreed}/{judge.cases} overall,{" "}
+                        {judge.agreement_on_cases_gateway_sends_to_judge.agreed}/
+                        {judge.agreement_on_cases_gateway_sends_to_judge.cases} on the ambiguous
+                        cases the gateway sends it ({judge.model}, {judge.prompt_version})
+                      </li>
+                    ) : null}
+                    {detector ? (
+                      <li>
+                        Injection detector: precision {detector.precision}, recall{" "}
+                        {detector.recall} on {detector.snippets} snippets
+                      </li>
+                    ) : null}
+                  </ul>
+                </>
+              ) : null}
+            </div>
           ) : null}
         </>
       ) : error ? null : (

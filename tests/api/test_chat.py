@@ -150,23 +150,24 @@ async def test_escalated_order_waits_for_the_human_then_executes_and_fills() -> 
     # Filled without any clock button: the session's market moved on after the turn.
     assert book["orders"][0]["status"] == "filled"
     nvda = next(p for p in book["positions"] if p["symbol"] == "NVDA")
-    assert nvda["qty"] > 10
+    assert nvda["qty"] > 0 and book["cash"] == 8500.0  # started empty with $10,000
 
 
 async def test_portfolio_has_positions_totals_and_day_change() -> None:
-    stack = Stack([quote_script()])
+    stack = Stack([order_script("Bought.", notional=500, symbol="AMD")])
     async with stack.client() as client:
         session_id = await start(client)
+        await send(client, session_id, "Buy $500 of AMD")
         book = (await client.get(f"/chat/sessions/{session_id}/portfolio")).json()
         await client.delete(f"/chat/sessions/{session_id}")
-    assert book["cash"] == 25000.0
-    assert {p["symbol"] for p in book["positions"]} == {"NVDA", "AAPL"}
-    for row in book["positions"]:
-        assert set(row) == {"symbol", "qty", "avg", "ltp", "value", "pnl", "pnl_pct",
-                            "day_change_pct"}  # fmt: skip
-        assert row["day_change_pct"] is not None
-    assert book["total_pnl"] == pytest.approx(sum(p["pnl"] for p in book["positions"]))
-    assert book["market_open"] is True and book["orders"] == []
+    assert book["cash"] == 9500.0
+    assert [p["symbol"] for p in book["positions"]] == ["AMD"]  # only what was bought
+    row = book["positions"][0]
+    assert set(row) == {"symbol", "qty", "avg", "ltp", "value", "pnl", "pnl_pct",
+                        "day_change_pct"}  # fmt: skip
+    assert row["day_change_pct"] is not None
+    assert book["total_pnl"] == pytest.approx(row["pnl"])
+    assert book["market_open"] is True and book["orders"][0]["status"] == "filled"
 
 
 async def test_two_traders_run_side_by_side_with_separate_books() -> None:
@@ -308,3 +309,21 @@ async def test_paper_connector_starts_the_gateway_on_the_alpaca_upstream() -> No
     assert args[args.index("--upstream") + 1] == "alpaca"
     assert "--scenario" not in args and "--dev-tools" not in args
     assert connection.market is None
+
+
+async def test_a_new_trader_starts_empty_with_the_chosen_cash() -> None:
+    stack = Stack([quote_script(), quote_script(), quote_script()])
+    async with stack.client() as client:
+        default = await start(client, "Asha")
+        rich = await start(client, "Ben", starting_cash=250000)
+        books = [(await client.get(f"/chat/sessions/{sid}/portfolio")).json()
+                 for sid in (default, rich)]  # fmt: skip
+        too_much = await client.post("/chat/sessions", json={"user": "Cy", "starting_cash": 2e6})
+        too_little = await client.post("/chat/sessions", json={"user": "Di", "starting_cash": 10})
+        info = (await client.get(f"/chat/sessions/{rich}")).json()
+        for sid in (default, rich):
+            await client.delete(f"/chat/sessions/{sid}")
+    assert books[0]["cash"] == 10000.0 and books[0]["positions"] == []
+    assert books[1]["cash"] == 250000.0 and books[1]["positions"] == []
+    assert info["starting_cash"] == 250000.0
+    assert too_much.status_code == 422 and too_little.status_code == 422

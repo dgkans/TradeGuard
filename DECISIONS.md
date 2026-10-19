@@ -537,3 +537,27 @@ Consequences: sessions share the API process, so a crash in one gateway could af
 others. Each session runs in its own task with errors contained, but there is no process
 isolation. Shared Postgres connections serialize writes; fine for a handful of traders,
 not for hundreds.
+
+## D020: Desk polish and two bug fixes (F10c)
+Date: 2026-10-18
+Decision:
+- **New accounts start empty.** Every trader session uses the scenario's market with no
+  positions and the trader's chosen cash ($1,000 to $1,000,000, default $10,000). Bug fixed:
+  the desk scenario had seeded 10 NVDA and 5 AAPL into every account.
+- **"Latest eval" means LLM runs.** The scripted worst case agent's report (F9c) was newer
+  and was being served as the latest eval, so the dashboard showed a different claim than it
+  described. `latest` now skips reports with an `agent` header; `?agent=attacker` asks for
+  the worst case run explicitly, and the page shows it in its own section.
+- **Same digits as RESULTS.md.** The dashboard rounds percentages half to even like Python's
+  `format()`. The value 0.9625 showed as 96.3% in the browser against 96.2% in the report.
+- **"What the guard stopped" counts trader sessions only** (`?scope=traders`, session ids
+  starting `web-`). The local database is shared with tests, the CLI and evals, whose rows
+  had dominated the counts.
+- **Plain-language Risk profiles and Test results pages**, built only from the policy files
+  and the eval reports. The raw YAML and the full tables stay behind toggles. The test-only
+  rules_only policy isn't offered as a profile.
+- **Simpler shell:** no "demo market" pill and no Trade/Operator labels; a narrower chat
+  column that grows with the conversation.
+Alternatives considered: a separate database for tests (still worth doing, F12);
+pre-rounding numbers in the API (the reports already store full precision; formatting is a
+display concern).

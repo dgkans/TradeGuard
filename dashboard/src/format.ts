@@ -54,8 +54,16 @@ export function otherArgs(args: JsonObject | undefined): JsonObject {
   return out;
 }
 
+/** One decimal, rounding an exact half to even like Python's format(), so the dashboard
+ * shows the same digits as the eval reports and RESULTS.md (96.25 -> "96.2"). */
 export function percent(value: number): string {
-  return `${(value * 100).toFixed(1)}%`;
+  const scaled = value * 1000;
+  const floor = Math.floor(scaled);
+  const diff = scaled - floor;
+  let rounded = floor;
+  if (diff > 0.5) rounded = floor + 1;
+  else if (diff === 0.5 && floor % 2 !== 0) rounded = floor + 1;
+  return `${(rounded / 10).toFixed(1)}%`;
 }
 
 const marketClock = new Intl.DateTimeFormat("en-US", {

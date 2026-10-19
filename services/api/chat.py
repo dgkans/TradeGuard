@@ -87,6 +87,7 @@ class ChatSpec:
     policy: str
     policy_path: Path
     user: str = "trader"
+    starting_cash: float = 10000.0
 
 
 @dataclass
@@ -355,6 +356,7 @@ class ChatSession:
             "policy": self.spec.policy if self.spec.guarded else None,
             "model": self.service.model_name,
             "started_at": self.started_at,
+            "starting_cash": self.spec.starting_cash,
             "busy": self.busy,
             "waiting_for_approval": self.pending is not None,
         }
@@ -426,7 +428,12 @@ class ChatService:
         return catalog.find_scenario(self.repo_root, scenario_id)
 
     async def create(
-        self, scenario: str, guarded: bool, policy: str, user: str = "trader"
+        self,
+        scenario: str,
+        guarded: bool,
+        policy: str,
+        user: str = "trader",
+        starting_cash: float = 10000.0,
     ) -> ChatSession:
         """Start a session. Raises ChatNotFoundError (scenario or policy), ChatBusyError (the
         trader already has one), TooManySessionsError."""
@@ -446,7 +453,7 @@ class ChatService:
         if len(self.sessions) >= self.max_sessions:
             raise TooManySessionsError(f"at most {self.max_sessions} open sessions; end one")
         session_id = f"web-{slug(user)}-{uuid.uuid4().hex[:8]}"
-        spec = ChatSpec(scenario, guarded, policy, path, user)
+        spec = ChatSpec(scenario, guarded, policy, path, user, float(starting_cash))
         session = ChatSession(session_id, spec, self)
         await session.start()
         self.sessions[session_id] = session
@@ -496,8 +503,12 @@ def inprocess_connector(
             async with paper(spec, session_id, token) as connection:
                 yield connection
             return
+        # A new trader's account: the cash they chose and no positions (F10c).
+        scenario = load_scenario(spec.scenario, repo_root / "scenarios").model_copy(
+            update={"starting_cash": spec.starting_cash, "positions": {}}
+        )
         market = ReplaySession(
-            load_scenario(spec.scenario, repo_root / "scenarios"),
+            scenario,
             bars_root=repo_root / "fixtures/bars",
             news_root=repo_root / "fixtures/news",
         )

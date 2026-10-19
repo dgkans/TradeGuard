@@ -3,6 +3,9 @@ import { useApi } from "../api";
 import type { SessionInfo } from "../types";
 import { ErrorNote } from "./common";
 
+const MIN_CASH = 1000;
+const MAX_CASH = 1_000_000;
+
 const PROFILES = [
   { policy: "default", label: "Standard" },
   { policy: "strict", label: "Strict" },
@@ -30,16 +33,19 @@ export function TraderBar({ sessions, activeId, onSelect, onStarted, onEnded }: 
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [showForm, setShowForm] = useState(false);
-  const ids = { name: useId(), policy: useId(), list: useId() };
+  const [cash, setCash] = useState("10000");
+  const ids = { name: useId(), policy: useId(), list: useId(), cash: useId(), cashHint: useId() };
+  const cashValue = Number(cash);
+  const cashOk = Number.isFinite(cashValue) && cashValue >= MIN_CASH && cashValue <= MAX_CASH;
   const formOpen = sessions.length === 0 || showForm;
 
   async function start(event: FormEvent) {
     event.preventDefault();
-    if (!name.trim() || starting) return;
+    if (!name.trim() || starting || !cashOk) return;
     setStarting(true);
     setError(null);
     try {
-      onStarted(await api.createSession(name.trim(), policy));
+      onStarted(await api.createSession(name.trim(), policy, cashValue));
       setName("");
       setShowForm(false);
     } catch (failure) {
@@ -79,7 +85,15 @@ export function TraderBar({ sessions, activeId, onSelect, onStarted, onEnded }: 
             <option key={profile.policy} value={profile.policy}>{profile.label}</option>
           ))}
         </select>
-        <button type="submit" className="button" disabled={starting || !name.trim()}>
+        <label htmlFor={ids.cash} className="field-label">Starting cash ($)</label>
+        <input id={ids.cash} className="input" type="number" inputMode="numeric"
+               min={MIN_CASH} max={MAX_CASH} step={1000} value={cash}
+               aria-describedby={ids.cashHint} aria-invalid={!cashOk}
+               onChange={(event) => setCash(event.target.value)} />
+        <span id={ids.cashHint} className={`hint ${cashOk ? "" : "hint-bad"}`}>
+          Between $1,000 and $1,000,000. New accounts start with no positions.
+        </span>
+        <button type="submit" className="button" disabled={starting || !name.trim() || !cashOk}>
           {starting ? "Starting…" : "Start session"}
         </button>
         <ErrorNote error={error} />

@@ -80,9 +80,11 @@ async def test_rules_fired_counts_only_blocking_decisions() -> None:
     with client_for(await seeded_audit()) as client:
         counts = client.get("/rules/fired").json()["rules"]
     assert counts == [
-        {"rule_id": "max_order_notional", "decision": "DENY", "count": 2},
-        {"rule_id": "approval_notional", "decision": "ESCALATE", "count": 1},
-    ]
+        {"rule_id": "max_order_notional", "decision": "DENY", "count": 2,
+         "title": "Order is over your per-order limit"},
+        {"rule_id": "approval_notional", "decision": "ESCALATE", "count": 1,
+         "title": "Large order: needs your approval"},
+    ]  # fmt: skip
 
 
 def test_policies_list_and_show_yaml() -> None:
@@ -146,6 +148,27 @@ def test_latest_eval_ignores_other_suites(tmp_path: Path) -> None:
     assert listed == {"full_a": "scenarios", "hard_b": "scenarios_hard"}
 
 
+def test_latest_eval_is_the_llm_run_not_the_scripted_worst_case(tmp_path: Path) -> None:
+    """Regression: the worst case agent's report is newer and was served as "latest"."""
+    write_report(tmp_path, "full_a", {"date": "2026-10-01 10:00 UTC", "smoke": False,
+                                      "mode": "record"})  # fmt: skip
+    write_report(tmp_path, "attacker_b", {"date": "2026-10-05 10:00 UTC", "smoke": False,
+                                          "mode": "record", "agent": "attacker"})  # fmt: skip
+    with client_for(root=tmp_path) as client:
+        assert client.get("/evals/latest").json()["name"] == "full_a"
+        worst = client.get("/evals/latest", params={"agent": "attacker"}).json()
+        bad = client.get("/evals/latest", params={"agent": "robot"})
+    assert worst["name"] == "attacker_b"
+    assert bad.status_code == 422
+
+
+def test_real_repo_latest_eval_is_an_llm_run() -> None:
+    with client_for() as client:
+        latest = client.get("/evals/latest").json()
+    assert latest["report"]["header"].get("agent") is None
+    assert "qwen" in latest["report"]["header"]["agent_model"]
+
+
 def test_latest_eval_is_404_when_there_is_none(tmp_path: Path) -> None:
     with client_for(root=tmp_path) as client:
         assert client.get("/evals/latest").status_code == 404
@@ -170,3 +193,16 @@ def test_scenarios_exclude_the_held_out_set() -> None:
     assert all(not s["id"].startswith("held") for s in scenarios)
     demo = next(s for s in scenarios if s["id"] == "demo")
     assert demo["category"] == "demo"
+
+
+async def test_rules_fired_can_be_limited_to_trader_sessions() -> None:
+    sink = await seeded_audit()  # sessions s1 and s2
+    await sink.record_decision(
+        DecisionRecord(session_id="web-asha-1", upstream="replay", tool="place_order",
+                       args={}, decision="DENY", rule_id="market_hours", reason="closed")
+    )  # fmt: skip
+    with client_for(sink) as client:
+        traders = client.get("/rules/fired", params={"scope": "traders"}).json()["rules"]
+        everything = client.get("/rules/fired").json()["rules"]
+    assert [r["rule_id"] for r in traders] == ["market_hours"]
+    assert len(everything) == 3

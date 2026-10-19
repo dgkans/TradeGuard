@@ -67,6 +67,7 @@ def list_reports(root: Path) -> list[dict[str, Any]]:
             "mode": header.get("mode"),
             "repeats": header.get("repeats"),
             "suite": header.get("suite") or "scenarios",
+            "agent": header.get("agent"),
         })  # fmt: skip
     out.sort(key=lambda report: (str(report["date"] or ""), report["name"]), reverse=True)
     return out
@@ -81,12 +82,15 @@ def read_report(root: Path, name: str) -> dict[str, Any] | None:
     return None
 
 
-def latest_full_report(root: Path) -> tuple[str, dict[str, Any]] | None:
+def latest_full_report(root: Path, agent: str | None = None) -> tuple[str, dict[str, Any]] | None:
     """Newest report on the main suite (not smoke, not another suite such as the hard
-    injection set), preferring recorded runs over replays of them."""
+    injection set), preferring recorded runs over replays of them. `agent=None` means LLM
+    agent runs only; "attacker" the scripted worst case agent (F9c)."""
     full = []
     for report in list_reports(root):
-        if not report["smoke"] and report["suite"] == "scenarios":
+        if report["smoke"] or report["suite"] != "scenarios":
+            continue
+        if report["agent"] == agent:
             full.append(report)
     recorded = []
     for report in full:

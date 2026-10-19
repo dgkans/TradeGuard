@@ -18,8 +18,8 @@ const TRADE = [
 const OPERATOR = [
   { path: "approvals", label: "Approvals" },
   { path: "audit", label: "Audit log" },
-  { path: "policies", label: "Policies" },
-  { path: "evals", label: "Evals" },
+  { path: "policies", label: "Risk profiles" },
+  { path: "evals", label: "Test results" },
 ] as const;
 
 type Path = (typeof TRADE)[number]["path"] | (typeof OPERATOR)[number]["path"];
@@ -119,17 +119,11 @@ export function App() {
           </svg>
           TradeGuard
         </a>
-        <span className="mode-pill" title="No live trading is possible in this build">
-          demo market · paper money
-        </span>
         <nav aria-label="Pages">
-          <span className="nav-group" aria-hidden="true">Trade</span>
           {TRADE.map((page) => (
             <NavLink key={page.path} path={page.path} label={page.label}
                      active={page.path === path} />
           ))}
-          <span className="nav-sep" aria-hidden="true" />
-          <span className="nav-group" aria-hidden="true">Operator</span>
           {OPERATOR.map((page) => (
             <NavLink key={page.path} path={page.path} label={page.label}
                      active={page.path === path}

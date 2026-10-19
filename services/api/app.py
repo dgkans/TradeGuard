@@ -25,6 +25,7 @@ from services.api.chat import (
     inprocess_connector,
     settings_models,
 )
+from services.api.describe import RULE_TITLES
 from services.common.config import Settings
 from services.common.llm import make_chat_model
 from services.gateway.api.app import add_approval_routes
@@ -57,6 +58,7 @@ class ChatCreate(BaseModel):
     scenario: str = Field(default="desk", min_length=1, max_length=100)
     guarded: bool = True
     policy: str = Field(default="default", min_length=1, max_length=100)
+    starting_cash: float = Field(default=10000, ge=1000, le=1_000_000)
 
 
 class ChatMessage(BaseModel):
@@ -108,8 +110,16 @@ def add_audit_routes(app: FastAPI, deps: ApiDeps) -> None:
         return {"events": events, "next_before_id": next_before}
 
     @app.get("/rules/fired")
-    async def rules_fired() -> dict[str, Any]:
-        return {"rules": await deps.audit.rule_counts()}
+    async def rules_fired(
+        scope: str | None = Query(default=None, pattern="^traders$"),
+    ) -> dict[str, Any]:
+        """Blocked and held counts per rule; `scope=traders` counts dashboard sessions only
+        (not CLI, eval or test runs that share the database)."""
+        prefix = "web-" if scope == "traders" else None
+        rules = await deps.audit.rule_counts(session_prefix=prefix)
+        for rule in rules:
+            rule["title"] = RULE_TITLES.get(str(rule["rule_id"]), str(rule["rule_id"]))
+        return {"rules": rules}
 
 
 def add_catalog_routes(app: FastAPI, root: Path, chat: ChatService | None = None) -> None:
@@ -132,8 +142,12 @@ def add_catalog_routes(app: FastAPI, root: Path, chat: ChatService | None = None
         return {"reports": catalog.list_reports(root)}
 
     @app.get("/evals/latest")
-    async def latest_eval() -> dict[str, Any]:
-        found = catalog.latest_full_report(root)
+    async def latest_eval(
+        agent: str | None = Query(default=None, pattern="^attacker$"),
+    ) -> dict[str, Any]:
+        """Newest main suite run with the LLM agent, or with `agent=attacker` the scripted
+        worst case agent's run (F9c). The two answer different questions."""
+        found = catalog.latest_full_report(root, agent=agent)
         if found is None:
             raise HTTPException(status_code=404, detail="no full suite eval report yet")
         return {"name": found[0], "report": found[1]}
@@ -169,7 +183,9 @@ def add_chat_routes(app: FastAPI, deps: ApiDeps) -> None:
 
     @app.post("/chat/sessions", status_code=201)
     async def create_session(body: ChatCreate) -> dict[str, Any]:
-        session = await service().create(body.scenario, body.guarded, body.policy, body.user)
+        session = await service().create(
+            body.scenario, body.guarded, body.policy, body.user, body.starting_cash
+        )
         return session.info()
 
     @app.get("/chat/sessions/{session_id}")

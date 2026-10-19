@@ -24,8 +24,12 @@ describe("TraderBar", () => {
     );
     await userEvent.type(screen.getByLabelText(/trader name/i), "Asha");
     await userEvent.selectOptions(screen.getByLabelText(/risk profile/i), "strict");
+    const cash = screen.getByLabelText(/starting cash/i);
+    expect(cash).toHaveValue(10000);
+    await userEvent.clear(cash);
+    await userEvent.type(cash, "250000");
     await userEvent.click(screen.getByRole("button", { name: /start session/i }));
-    expect(createSession).toHaveBeenCalledWith("Asha", "strict");
+    expect(createSession).toHaveBeenCalledWith("Asha", "strict", 250000);
     expect(onStarted).toHaveBeenCalledWith(info("Asha"));
   });
 
@@ -80,6 +84,23 @@ describe("TraderBar", () => {
     expect(screen.queryByLabelText(/trader name/i)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /new session/i }));
     expect(screen.getByLabelText(/trader name/i)).toBeInTheDocument();
+  });
+
+  it("keeps starting cash between $1,000 and $1,000,000", async () => {
+    const createSession = vi.fn(async () => info("Asha"));
+    render(
+      <ApiContext.Provider value={fakeApi({ createSession })}>
+        <TraderBar sessions={[]} activeId={null} onSelect={vi.fn()} onStarted={vi.fn()}
+                   onEnded={vi.fn()} />
+      </ApiContext.Provider>,
+    );
+    await userEvent.type(screen.getByLabelText(/trader name/i), "Asha");
+    const cash = screen.getByLabelText(/starting cash/i);
+    await userEvent.clear(cash);
+    await userEvent.type(cash, "5000000");
+    expect(screen.getByRole("button", { name: /start session/i })).toBeDisabled();
+    expect(screen.getByText(/between \$1,000 and \$1,000,000/i)).toBeInTheDocument();
+    expect(createSession).not.toHaveBeenCalled();
   });
 });
 

@@ -166,8 +166,9 @@ class AuditReader(Protocol):
         """Events matching `query`, newest first, at most `query.limit`."""
         ...
 
-    async def rule_counts(self) -> list[dict[str, Any]]:
-        """How often each rule blocked or escalated: [{rule_id, decision, count}], most first."""
+    async def rule_counts(self, session_prefix: str | None = None) -> list[dict[str, Any]]:
+        """How often each rule blocked or escalated: [{rule_id, decision, count}], most first.
+        `session_prefix` limits it to sessions whose id starts with it (e.g. "web-")."""
         ...
 
 
@@ -209,10 +210,12 @@ class MemoryAuditReader:
                 break
         return out
 
-    async def rule_counts(self) -> list[dict[str, Any]]:
+    async def rule_counts(self, session_prefix: str | None = None) -> list[dict[str, Any]]:
         counts: dict[tuple[str, str], int] = {}
         for event in self.sink.events:
             if event["decision"] == "ALLOW":
+                continue
+            if session_prefix and not str(event["session_id"]).startswith(session_prefix):
                 continue
             key = (event["rule_id"], event["decision"])
             counts[key] = counts.get(key, 0) + 1
@@ -232,6 +235,7 @@ limit %(limit)s
 SELECT_RULE_COUNTS = """
 select rule_id, decision, count(*) from audit_events
 where decision <> 'ALLOW'
+  and (%(prefix)s::text is null or starts_with(session_id, %(prefix)s))
 group by rule_id, decision
 """
 
@@ -276,9 +280,11 @@ class PostgresAuditReader:
             out.append(event)
         return out
 
-    async def rule_counts(self) -> list[dict[str, Any]]:
+    async def rule_counts(self, session_prefix: str | None = None) -> list[dict[str, Any]]:
         async with self._lock:
-            cursor = await self._connection().execute(SELECT_RULE_COUNTS)
+            cursor = await self._connection().execute(
+                SELECT_RULE_COUNTS, {"prefix": session_prefix}
+            )
             rows = await cursor.fetchall()
         counts: dict[tuple[str, str], int] = {}
         for rule_id, decision, count in rows:

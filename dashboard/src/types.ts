@@ -68,6 +68,8 @@ export interface RuleCount {
   rule_id: string;
   decision: Decision;
   count: number;
+  /** Plain-language title, e.g. "Order is over your per-order limit". */
+  title?: string;
 }
 
 export interface PolicyRef {
@@ -123,6 +125,7 @@ export interface EvalReportRef {
   mode: string | null;
   repeats: number | null;
   suite: string;
+  agent?: string | null;
 }
 
 export interface Scenario {
@@ -142,6 +145,7 @@ export interface SessionInfo {
   policy: string | null;
   model: string;
   started_at: string;
+  starting_cash?: number;
   busy: boolean;
   waiting_for_approval: boolean;
 }

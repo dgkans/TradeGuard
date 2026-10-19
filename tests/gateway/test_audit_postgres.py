@@ -100,3 +100,18 @@ async def test_reader_filters_pages_and_counts_rules() -> None:
     pairs = {(row["rule_id"], row["decision"]) for row in counts}
     assert ("max_order_notional", "DENY") in pairs
     assert all(row["decision"] != "ALLOW" for row in counts)
+
+
+async def test_reader_counts_rules_for_one_session_prefix() -> None:
+    from services.gateway.audit import PostgresAuditReader
+
+    migrate(database_url())
+    prefix = f"pg-prefix-{uuid.uuid4().hex[:6]}-"
+    async with PostgresAuditSink(database_url()) as sink:
+        await sink.record_decision(DecisionRecord(
+            session_id=prefix + "a", upstream="replay", tool="place_order", args={},
+            decision="DENY", rule_id="market_hours", reason="closed",
+        ))  # fmt: skip
+    async with PostgresAuditReader(database_url()) as reader:
+        counts = await reader.rule_counts(session_prefix=prefix)
+    assert counts == [{"rule_id": "market_hours", "decision": "DENY", "count": 1}]

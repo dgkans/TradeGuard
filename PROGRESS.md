@@ -16,7 +16,8 @@
 | F9c Worst case agent | done | 2026-10-18 |
 | F10 Dashboard | done | 2026-10-18 |
 | F10b Trading desk (multi user) | done | 2026-10-18 |
-| F11 Alpaca paper | in progress | |
+| F10c Desk polish | done | 2026-10-18 |
+| F11 Alpaca paper | deferred by user (adapter built and tested against a stand-in) | |
 | F12 Deployment | not started | |
 | F13 Impact and beta | not started | |
 | F14 Ship it | not started | |
@@ -480,3 +481,51 @@ Work:
   - Positions only for replay sessions.
   - The local model sets the user limit (about 5–8 at once on this Mac).
 - Next: F11 open item (real paper check needs keys, user declined sign up), then F12 (needs a decision on hosted accounts vs local only).
+
+## F10c Desk polish (user request 2026-10-18)
+### Plan
+- **Bug:** new accounts were seeded with 10 NVDA and 5 AAPL. New accounts start with no positions and $10,000 cash; the trader can choose $1,000 to $1,000,000 when starting a session.
+- **Bug:** "latest eval" picked the scripted worst case agent report (newer) instead of the LLM run. Latest now means LLM runs only; the worst case run gets its own lookup and is shown separately.
+- **Chat:** a smaller, centred window that grows with the conversation.
+- **Top bar:** remove the "demo market · paper money" pill and the Trade / Operator labels. No sign in or out (unchanged).
+- **Policies tab in plain words:** risk profiles as rule cards (limits, allowed stocks, approvals, checks), "what the guard stopped" with plain titles, and the raw YAML behind a toggle.
+- **Evals tab in plain words:**
+  - Headline cards: unsafe orders stopped, good orders wrongly blocked, tasks done right, with the three setups explained.
+  - The worst case result shown separately.
+  - Caveats up front; detailed tables behind a toggle.
+  - Numbers come only from the eval reports (RESULTS.md).
+- **F11 deferred by the user:** the Alpaca adapter stays, tested against the stand-in; the real paper check is not done.
+- **Plan check:** re-check what's built against PLAN.md, the resume skills it targets, and the deviations.
+### Acceptance
+- [x] A new trader has no positions and the chosen starting cash (tested; checked live: $50,000, empty, then only AMD after one buy)
+- [x] Evals shows the LLM run, never the worst case run as "latest" (regression test; live API returns full_4435fea again)
+- [x] Policies and Evals readable without knowing rule ids (tested: no rule ids or setting names in the plain views)
+- [x] Pill and nav group labels gone; chat window compact (checked by screenshot)
+### Notes and open questions
+- Found while checking screenshots and fixed with tests:
+  - The dashboard showed 96.3% where RESULTS.md says 96.2% (rounding half up instead of half to even).
+  - "What the guard stopped" was mostly test-suite rows from the shared local database.
+- **Plan check against PLAN.md (2026-10-18):**
+  - Done to plan: F0 to F10, plus F9b and F9c (added after the F9 results looked too good, PLAN 7.4.4).
+  - Changed at the user's request: F10b and F10c (trader desk, multi trader, plain language, injection hidden from the UI but still enforced).
+  - Not done: F11's real paper check (deferred by the user; the adapter is tested against a stand-in), and F12, F13 and F14 (not started; F12 needs the hosting decision).
+  - Unverified until the first push or a Docker install: CI (GitHub Actions) and the Docker Compose stack (no Docker on this Mac; local Postgres and the Jaeger binary are used instead).
+- **Resume skills this project now shows** (PLAN Section 10; numbers only from RESULTS.md):
+  - MCP: gateway as both server and client.
+  - LangGraph: StateGraph, interrupt-based human in the loop, Postgres checkpointer.
+  - LLM evaluation: 100 + 20 scenario harness, tapes, held out set, 1,485 recorded runs (1,080 with the LLM agent: 900 main and 180 hard; 405 with the scripted worst case agent).
+  - Guardrails: policy, taint and intent checks, LLM judge.
+  - OpenTelemetry and Jaeger.
+  - React with strict TypeScript.
+  - FastAPI, PostgreSQL and Alembic.
+  - Local LLMs (Ollama).
+### Loop summary
+- Built:
+  - Empty accounts with a chosen starting cash.
+  - Worst case run kept out of "latest eval".
+  - Plain-language Risk profiles and Test results pages.
+  - Trader-only rule counts, Python-matching rounding, a simpler top bar and a compact chat.
+- Tests: Python 427 passing, 1 skipped (`make check` clean); Vitest 34 passing; build OK; smoke replay 10/10.
+- Evals: none run. The dashboard now shows existing results exactly as in RESULTS.md.
+- Gaps: CI and Docker unverified; shared local database for tests and the dev stack; F11 real paper check deferred.
+- Next: F12 Deployment, after the user's decision (hosted free tiers that need accounts, or local only).

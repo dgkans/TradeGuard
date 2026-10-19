@@ -32,14 +32,16 @@ export interface Api {
   approve(id: string, decidedBy: string, note: string): Promise<Approval>;
   reject(id: string, decidedBy: string, note: string): Promise<Approval>;
   audit(filters: AuditFilters): Promise<AuditPage>;
-  rulesFired(): Promise<RuleCount[]>;
+  /** Blocked and held counts per rule; "traders" counts dashboard sessions only. */
+  rulesFired(scope?: "traders"): Promise<RuleCount[]>;
   policies(): Promise<PolicyRef[]>;
   policy(name: string): Promise<PolicyDetail>;
   evals(): Promise<EvalReportRef[]>;
-  latestEval(): Promise<{ name: string; report: EvalReport }>;
+  /** The latest LLM run, or with "attacker" the scripted worst case run. */
+  latestEval(agent?: "attacker"): Promise<{ name: string; report: EvalReport }>;
   scenarios(): Promise<Scenario[]>;
   sessions(): Promise<SessionInfo[]>;
-  createSession(user: string, policy: string): Promise<SessionInfo>;
+  createSession(user: string, policy: string, startingCash: number): Promise<SessionInfo>;
   session(id: string): Promise<SessionState>;
   send(id: string, text: string): Promise<TurnResult>;
   resume(id: string): Promise<TurnResult>;
@@ -108,8 +110,8 @@ export const httpApi: Api = {
   reject: (id, decidedBy, note) =>
     post<Approval>(`/approvals/${encodeURIComponent(id)}/reject`, { decided_by: decidedBy, note }),
   audit: (filters) => request<AuditPage>(`/audit${query({ ...filters })}`),
-  async rulesFired() {
-    return (await request<{ rules: RuleCount[] }>("/rules/fired")).rules;
+  async rulesFired(scope) {
+    return (await request<{ rules: RuleCount[] }>(`/rules/fired${query({ scope })}`)).rules;
   },
   async policies() {
     return (await request<{ policies: PolicyRef[] }>("/policies")).policies;
@@ -118,15 +120,17 @@ export const httpApi: Api = {
   async evals() {
     return (await request<{ reports: EvalReportRef[] }>("/evals")).reports;
   },
-  latestEval: () => request<{ name: string; report: EvalReport }>("/evals/latest"),
+  latestEval: (agent) =>
+    request<{ name: string; report: EvalReport }>(`/evals/latest${query({ agent })}`),
   async scenarios() {
     return (await request<{ scenarios: Scenario[] }>("/scenarios")).scenarios;
   },
   async sessions() {
     return (await request<{ sessions: SessionInfo[] }>("/chat/sessions")).sessions;
   },
-  createSession: (user, policy) =>
-    post<SessionInfo>("/chat/sessions", { user, policy, scenario: "desk", guarded: true }),
+  createSession: (user, policy, startingCash) =>
+    post<SessionInfo>("/chat/sessions", { user, policy, scenario: "desk", guarded: true,
+                                          starting_cash: startingCash }),
   session: (id) => request<SessionState>(`/chat/sessions/${encodeURIComponent(id)}`),
   send: (id, text) => post<TurnResult>(`/chat/sessions/${encodeURIComponent(id)}/messages`, { text }),
   resume: (id) => post<TurnResult>(`/chat/sessions/${encodeURIComponent(id)}/resume`),

@@ -228,13 +228,18 @@ make dashboard-check     # eslint (no `any`), tsc, vitest, production build
   as a notice with the reason, and large orders as an approval card. No JSON anywhere.
 - **Positions:** a Kite style table (instrument, qty, avg, LTP, P&L, day change, totals),
   cash and holdings, and today's orders.
-- **Several traders at once:** each trader starts their own session (name and risk
-  profile) and has their own account, positions, approvals and audit trail. Each has an
-  End button in the sidebar.
+- **Several traders at once:** each trader starts their own session (name, risk profile,
+  starting cash from $1,000 to $1,000,000, default $10,000). Each account starts with no
+  positions and has its own approvals and audit trail. Each trader has an End button in
+  the sidebar. There is no sign in.
 
-**Operator** (the broker's risk desk): **Approvals** (every trader's pending orders),
-**Audit log** (every decision, with Jaeger trace links), **Policies** (YAML and the rules
-that fired most), **Evals** (the latest full suite report).
+**Operator** (the broker's risk desk):
+- **Approvals:** every trader's pending orders.
+- **Audit log:** every decision, with Jaeger trace links.
+- **Risk profiles:** each profile's rules in plain words, and what the guard stopped
+  for traders.
+- **Test results:** the latest eval in plain words, the worst case run, and the full
+  tables on request.
 
 The **How it works** button explains the flow (You → AI agent → TradeGuard → Broker) with
 a worked example, and how a broker plugs it in.
@@ -250,7 +255,8 @@ Start Postgres, Ollama, `make jaeger`, `make api` and `make dashboard`, then ope
 http://127.0.0.1:5173.
 
 1. **Start a session (10 s).** Type a trader name (e.g. Asha), keep the risk profile on
-   Standard, then press **Start session**.
+   Standard and the starting cash at $10,000, then press **Start session**. Positions are
+   empty.
 2. **Ask and trade (40 s).** Tap the "What is NVDA at?" suggestion, then send
    "Buy $500 of AMD". Each step appears as a line, then the agent's answer.
 3. **A blocked order (20 s).** Send "Buy $3000 of TSLA". A red notice says **Order is over
@@ -262,7 +268,8 @@ http://127.0.0.1:5173.
 6. **A second trader (20 s).** Press **+ New session**, start "Ben" with the **Strict**
    profile, and trade. Asha's and Ben's positions stay separate. **End** closes either one.
 7. **Operator view (15 s).** **Approvals** lists decisions from every trader. **Audit log**
-   shows every check with a Trace link.
+   shows every check with a Trace link. **Risk profiles** and **Test results** explain the
+   rules and the eval results in plain words.
 
 ## Alpaca paper trading (F11)
 
