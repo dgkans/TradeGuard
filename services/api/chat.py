@@ -41,7 +41,7 @@ from services.api.describe import (
     friendly_reason,
 )
 from services.api.limits import LOCKED, Limits, limits_of, universe, with_limits
-from services.api.live import LiveFeed, LiveMarket
+from services.api.live import DeskReplayMarket, LiveFeed, LiveMarket, SavedBook
 from services.common.config import Settings, child_env
 from services.common.llm import make_chat_model
 from services.gateway.audit import DecisionRecord
@@ -458,7 +458,7 @@ class ChatSession:
 
     def restore(self, trader: Any) -> None:
         """Bring back a saved account: the book, limits and the conversation."""
-        if trader.book and isinstance(self.market, LiveMarket):
+        if trader.book and isinstance(self.market, SavedBook):
             self.market.load(trader.book)
         if trader.limits and self.gateway is not None:
             limits = Limits(**trader.limits)
@@ -661,7 +661,7 @@ class ChatService:
         trader_id = session.spec.trader_id
         if self.store is None or trader_id is None:
             return
-        book = session.market.snapshot() if isinstance(session.market, LiveMarket) else None
+        book = session.market.snapshot() if isinstance(session.market, SavedBook) else None
         await self.store.save_state(trader_id, book=book, transcript=session.transcript,
                                     limits=session.custom_limits)  # fmt: skip
 
@@ -769,6 +769,9 @@ def inprocess_connector(
         market: ReplaySession
         if feed is not None and spec.trader_id is not None and spec.scenario == DEFAULT_SCENARIO:
             market = LiveMarket(scenario, feed, cash=spec.starting_cash)
+        elif spec.trader_id is not None:  # a trader's account on replayed prices: saved too
+            market = DeskReplayMarket(scenario, bars_root=repo_root / "fixtures/bars",
+                                      news_root=repo_root / "fixtures/news")  # fmt: skip
         else:
             market = ReplaySession(scenario, bars_root=repo_root / "fixtures/bars",
                                    news_root=repo_root / "fixtures/news")  # fmt: skip

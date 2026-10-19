@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -24,7 +25,12 @@ import httpx
 from services.replay_server.bars import INTERVALS, MARKET_CLOSE, MARKET_OPEN, MARKET_TZ, Bar
 from services.replay_server.broker import Order, Position, SimBroker, to_decimal
 from services.replay_server.scenario import Scenario
-from services.replay_server.session import MAX_NEWS, ReplaySession, ToolInputError
+from services.replay_server.session import (
+    MAX_ADVANCE_MINUTES,
+    MAX_NEWS,
+    ReplaySession,
+    ToolInputError,
+)
 
 logger = logging.getLogger(__name__)
 CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -280,7 +286,54 @@ class LiveBroker(SimBroker):
         return f"ord_{secrets.token_hex(6)}"
 
 
-class LiveMarket(ReplaySession):
+class SavedBook:
+    """A market whose book (cash, positions, orders) can be saved and loaded, so a trader's
+    account survives the API restarting (F10f, F12)."""
+
+    broker: SimBroker
+
+    def snapshot(self) -> dict[str, Any]:
+        broker = self.broker
+        return {
+            "cash": str(broker.cash),
+            "positions": {symbol: {"qty": str(p.qty), "avg": str(p.avg_entry_price)}
+                          for symbol, p in broker.positions.items()},
+            "orders": [_order_state(order) for order in broker.orders],
+        }  # fmt: skip
+
+    def load(self, book: dict[str, Any]) -> None:
+        broker = self.broker
+        broker.cash = Decimal(book["cash"])
+        broker.positions = {symbol: Position(Decimal(p["qty"]), Decimal(p["avg"]))
+                            for symbol, p in book.get("positions", {}).items()}  # fmt: skip
+        broker.orders = [_order_from(state) for state in book.get("orders", [])]
+
+
+class DeskReplayMarket(SavedBook, ReplaySession):
+    """The trading desk on replayed prices (LIVE_PRICES=false, F12): the replay market with
+    a saved book and random order ids, so a loaded account never reuses an id."""
+
+    def __init__(self, scenario: Scenario, *, bars_root: Path, news_root: Path) -> None:
+        super().__init__(scenario, bars_root=bars_root, news_root=news_root)
+        self.broker = LiveBroker(cash=self.broker.cash, seed=self.broker.seed)
+
+    def load(self, book: dict[str, Any]) -> None:
+        """Load the book, then move the clock past its latest order so fills line up."""
+        super().load(book)
+        times = []
+        for order in self.broker.orders:
+            times.append(order.submitted_at)
+            if order.filled_at is not None:
+                times.append(order.filled_at)
+        if times and max(times) > self.now:
+            minutes = int((max(times) - self.now).total_seconds() // 60) + 1
+            while minutes > 0:
+                step = min(minutes, MAX_ADVANCE_MINUTES)
+                self.advance(step)
+                minutes -= step
+
+
+class LiveMarket(SavedBook, ReplaySession):
     """A trader's paper account priced by the live feed. Same tools as a replay session.
 
     Market orders fill at the live price while the market is open; limit orders fill when
@@ -381,24 +434,6 @@ class LiveMarket(ReplaySession):
                     self.broker._execute(order, price, now)
             if order.status == "new" and now >= order.expires_at:
                 order.status = "expired"
-
-    # --- saving (accounts survive restarts) ----------------------------------------
-
-    def snapshot(self) -> dict[str, Any]:
-        broker = self.broker
-        return {
-            "cash": str(broker.cash),
-            "positions": {symbol: {"qty": str(p.qty), "avg": str(p.avg_entry_price)}
-                          for symbol, p in broker.positions.items()},
-            "orders": [_order_state(order) for order in broker.orders],
-        }  # fmt: skip
-
-    def load(self, book: dict[str, Any]) -> None:
-        broker = self.broker
-        broker.cash = Decimal(book["cash"])
-        broker.positions = {symbol: Position(Decimal(p["qty"]), Decimal(p["avg"]))
-                            for symbol, p in book.get("positions", {}).items()}  # fmt: skip
-        broker.orders = [_order_from(state) for state in book.get("orders", [])]
 
 
 _PLAIN = ("id", "symbol", "side", "type", "status", "reject_reason")

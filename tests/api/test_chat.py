@@ -628,3 +628,27 @@ async def test_a_provider_failure_is_a_friendly_503_and_hides_the_cause() -> Non
     )
     assert "API Key" not in failed.text
     assert still.status_code == 200
+
+
+async def test_a_replay_account_also_comes_back_after_a_restart() -> None:
+    """LIVE_PRICES=false (F12): the sleeping free server restarts on wake; the book stays."""
+    store = MemoryTraderStore()
+    first = Stack([order_script("Sent.", notional=500, symbol="AMD")], store=store)
+    async with first.client() as client:
+        asha = await signup(client, "asha", starting_cash=20000)
+        await send(client, asha, "Buy $500 of AMD")
+        book = await get(client, asha, "/me/portfolio")
+    second = Stack([quote_script()], store=store)  # a new process, same database
+    async with second.client() as client:
+        login = await client.post("/auth/login", json={"username": "asha",
+                                                        "password": "pw-asha-123"})  # fmt: skip
+        again = {"x-trader-token": login.json()["token"]}
+        back = await get(client, again, "/me/portfolio")
+        await send(client, again, "What is NVDA at?")
+        later = await get(client, again, "/me/portfolio")
+    assert book["orders"][0]["status"] == "filled"
+    assert back["orders"] == book["orders"]
+    assert back["cash"] == book["cash"] == 19500.0
+    assert back["positions"] == book["positions"]
+    assert back["as_of"] >= book["orders"][0]["submitted_at"]  # clock caught up to the book
+    assert later["orders"] == book["orders"]
