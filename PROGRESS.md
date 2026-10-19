@@ -21,7 +21,7 @@
 | F10e Trader accounts and live replay | done | 2026-10-18 |
 | F10f Live prices, one login form | done | 2026-10-18 |
 | F11 Alpaca paper | deferred by user (adapter built and tested against a stand-in) | |
-| F12 Deployment | in progress | |
+| F12 Deployment | done | 2026-10-19 |
 | F13 Impact and beta | not started | |
 | F14 Ship it | not started | |
 
@@ -654,7 +654,7 @@ Work:
 - Gaps: agent memory across restarts; the Yahoo data source isn't licensed for public use.
 - Next: F12 Deployment (hosting decision pending; it needs a licensed data source if public).
 
-## Current feature: F12 Deployment (user decisions 2026-10-18)
+## F12 Deployment (user decisions 2026-10-18)
 ### Plan
 User choices: Render (API, in the owner's existing workspace, sleeping when idle) + Neon (Postgres) + Cloudflare Pages (dashboard), Groq for the AI, and a push to GitHub after each approved feature (it auto-deploys). The user first chose an uptime ping, then dropped it: the workspace is shared with another project, and an always-on API would use its 750 free hours. Live prices and accounts stay on (F10f), replacing PLAN 13.2's "replay only" demo mode.
 - **AI on Groq:**
@@ -686,7 +686,7 @@ User choices: Render (API, in the owner's existing workspace, sleeping when idle
 - [x] Stores survive the database dropping idle connections (tested by killing the connections in Postgres)
 - [x] The production start path runs locally with production settings (migrate, `/readyz` ok, CORS, 223 MB idle); the Docker image is built and started in CI (first run on the first push)
 - [x] No secrets in git history, the image or the client bundle (gitleaks: 26 commits clean, bundle clean; `.env` is ignored by git and Docker)
-- [ ] Push to `main` with passing CI deploys automatically; the public URL works on desktop and phone (after the owner's sign-ups)
+- [x] Push to `main` with passing CI deploys automatically; the public URL works on desktop and phone. Live check 2026-10-19 during market hours: sign-up; a Groq answer in 1.7 s; a $500 AMD order filled at the live Finnhub price ($541.47, 0.92 shares); a $3,000 TSLA order blocked by the per-order limit; no overflow at 390 px; CI green on every push.
 ### Notes and open questions
 - Docker isn't installed on this Mac, so the image is first built by CI and Render. The same start command was run locally in production mode.
 - A bad AI key used to show a bare "500 Internal Server Error". Found in the local production run and fixed (friendly 503, plus a JSON backstop for any unexpected error).
@@ -696,4 +696,15 @@ User choices: Render (API, in the owner's existing workspace, sleeping when idle
 - Still to check: memory with several traders (512 MB).
 - The landing page line "Trades are paper only: no real money." was removed (user request).
 ### Loop summary
-- Pending until the site is live.
+- Built:
+  - A free live deployment: Render (Docker, sleeps when idle), Neon Postgres, Cloudflare Pages, Groq (gpt-oss), and Finnhub live prices, with CI/CD.
+  - Free-plan guard rails: daily AI caps stored in Postgres, friendly rate-limit and outage messages, per-IP sign-up limits, a history window.
+  - Reconnecting Postgres stores, production fail-closed settings, `/readyz`, CORS, a waking notice.
+  - PROJECT.md.
+- Tests: Python 506 passing, 1 skipped; Vitest 52 passing; CI jobs: python, dashboard, image (build, start, readyz, non-root, 167 MB), secret scan, compose.
+- Evals: none rerun (evals stay on replay and Ollama); RESULTS.md unchanged.
+- Gaps:
+  - Finnhub's free plan has no price history, so charts build up while awake and pattern history ends 16 Oct 2026.
+  - About 30 AI turns a day on Groq's free plan.
+  - The first visit after 15 idle minutes waits about a minute.
+- Next: F13 Impact instrumentation and beta.
