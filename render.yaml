@@ -49,7 +49,11 @@ services:
         value: "true"
       - key: JAEGER_UI_URL
         value: ""
-      - key: LIVE_PRICES
-        value: "true"
+      # Yahoo refuses Render's servers (429), so Finnhub's free plan. Without the key the
+      # desk runs on replayed prices.
+      - key: LIVE_PRICE_SOURCE
+        value: finnhub
+      - key: FINNHUB_API_KEY
+        sync: false
       - key: APPROVAL_TIMEOUT_SECONDS
         value: "300"

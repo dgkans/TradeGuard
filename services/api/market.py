@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from services.api.live import SOURCE, LiveFeed, LiveMarket
+from services.api.live import LiveFeed, LiveMarket
 from services.replay_server.scenario import load_scenario
 from services.replay_server.session import ReplaySession
 
@@ -33,6 +33,8 @@ def summary(market: ReplaySession, symbol: str) -> dict[str, Any] | None:
     spark = []
     for bar in intraday:
         spark.append(round(float(bar["close"]), 2))
+    if len(spark) < 2 and previous:
+        spark.insert(0, round(previous, 2))  # little history yet: from the previous close
     if not spark or spark[-1] != round(price, 2):
         spark.append(round(price, 2))
     return {
@@ -69,7 +71,7 @@ def overview(root: Path, feed: LiveFeed | None = None, scenario_id: str = "desk"
     scenario = load_scenario(scenario_id, root / "scenarios")
     data = _build(LiveMarket(scenario, feed, cash=0), scenario.watchlist)
     times = [item.at for item in (feed.quote(s) for s in feed.symbols) if item is not None]
-    return {**data, "live": True, "source": SOURCE,
+    return {**data, "live": True, "source": feed.source,
             "prices_as_of": max(times).isoformat() if times else None}  # fmt: skip
 
 

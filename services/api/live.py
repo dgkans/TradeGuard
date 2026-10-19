@@ -124,6 +124,7 @@ class SymbolData:
     fetched_at: datetime | None = None
     news: list[Headline] = field(default_factory=list)
     news_at: datetime | None = None
+    previous: float | None = None  # previous close, when the source gives it (Finnhub)
 
 
 # --- the shared feed -------------------------------------------------------------------
@@ -131,6 +132,8 @@ class SymbolData:
 
 class LiveFeed:
     """Latest prices, bars, session times and headlines for a fixed set of symbols."""
+
+    source = SOURCE
 
     def __init__(
         self,
@@ -244,6 +247,8 @@ class LiveFeed:
         slot = self.data.get(symbol)
         if slot is None or slot.quote is None:
             return None
+        if slot.previous:
+            return slot.previous
         quote_day = slot.quote.at.astimezone(MARKET_TZ).date()
         for bar in reversed(slot.daily):
             if bar.start.astimezone(MARKET_TZ).date() < quote_day:
@@ -265,7 +270,7 @@ class LiveFeed:
         fetched = [slot.fetched_at for slot in self.data.values() if slot.fetched_at]
         return {
             "live": True,
-            "source": SOURCE,
+            "source": self.source,
             "now": now.isoformat(),
             "market_open": self.market_open(now),
             "session_start": self.session.start.isoformat() if self.session else None,
@@ -273,6 +278,8 @@ class LiveFeed:
             "prices_as_of": max(times).isoformat() if times else None,
             "updated_at": max(fetched).isoformat() if fetched else None,
             "stale": not fetched or now - max(fetched) > self.stale_after,
+            # The kind of the last failure (e.g. RateLimitedError), never its details.
+            "problem": self.last_error.split(":")[0] if self.last_error else None,
         }
 
 

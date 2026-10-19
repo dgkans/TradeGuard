@@ -47,6 +47,7 @@ from services.api.chat import (
     settings_models,
 )
 from services.api.describe import RULE_TITLES
+from services.api.finnhub import FinnhubFeed, finnhub_fetch
 from services.api.limits import Limits, universe
 from services.api.live import LiveFeed, http_fetch
 from services.common.config import Settings
@@ -210,7 +211,7 @@ def create_app(deps: ApiDeps) -> FastAPI:
         if deps.feed is None:
             return {"live": False, "source": "replay", "now": None, "market_open": False,
                     "session_start": None, "session_end": None, "prices_as_of": None,
-                    "updated_at": None, "stale": False}  # fmt: skip
+                    "updated_at": None, "stale": False, "problem": None}  # fmt: skip
         return deps.feed.status()
 
     add_approval_routes(app, deps.approvals, dependencies=admin_only)
@@ -585,6 +586,28 @@ def paper_watchlist(settings: Settings) -> list[str] | None:
     return symbols
 
 
+def live_feed(settings: Settings, http: dict[str, httpx.AsyncClient]) -> LiveFeed | None:
+    """The live price feed the settings ask for, or None for replayed prices (F10f, F12).
+    The HTTP client is opened in the app's lifespan, so requests look it up then."""
+    if not settings.live_prices:
+        return None
+    if settings.live_price_source == "finnhub":
+        if settings.finnhub_api_key is None:
+            logger.warning("LIVE_PRICE_SOURCE=finnhub without FINNHUB_API_KEY: replayed prices")
+            return None
+        key = settings.finnhub_api_key.get_secret_value()
+
+        async def finnhub(url: str, params: dict[str, Any]) -> dict[str, Any]:
+            return await finnhub_fetch(http["client"], key)(url, params)
+
+        return FinnhubFeed(universe(), finnhub, history_root=REPO_ROOT / "fixtures/bars")
+
+    async def yahoo(url: str, params: dict[str, Any]) -> dict[str, Any]:
+        return await http_fetch(http["client"])(url, params)
+
+    return LiveFeed(universe(), yahoo)
+
+
 def create_postgres_app(settings: Settings) -> FastAPI:
     """The API against DATABASE_URL. Trader sessions run their market and gateway in this
     process and share one set of Postgres stores (F10b); paper sessions use a subprocess."""
@@ -595,11 +618,7 @@ def create_postgres_app(settings: Settings) -> FastAPI:
         return cast(GatewayStores, holder["stores"])
 
     http: dict[str, httpx.AsyncClient] = {}
-
-    async def fetch(url: str, params: dict[str, Any]) -> dict[str, Any]:
-        return await http_fetch(http["client"])(url, params)
-
-    feed = LiveFeed(universe(), fetch) if settings.live_prices else None
+    feed = live_feed(settings, http)
     chat = ChatService(
         connect=inprocess_connector(REPO_ROOT, stores, settings.approval_timeout_seconds, feed),
         models=settings_models(settings),

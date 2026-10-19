@@ -691,7 +691,9 @@ User choices: Render (API, in the owner's existing workspace, sleeping when idle
 - Docker isn't installed on this Mac, so the image is first built by CI and Render. The same start command was run locally in production mode.
 - A bad AI key used to show a bare "500 Internal Server Error". Found in the local production run and fixed (friendly 503, plus a JSON backstop for any unexpected error).
 - Groq's free limits are tight (8K tokens a minute, 200K a day on the main model), so about 10 to 30 AI turns a day in total (D024).
-- To check after deploy: Yahoo from Render's addresses (fallback: a free Finnhub key), and memory with several traders (512 MB).
+- After deploy, Yahoo was refused: Render's logs showed 429 for all 20 symbols on every poll. Switched to Finnhub's free plan, with replayed prices until the key is set (D025). Replay accounts are now saved too, since the sleeping server restarts on wake.
+- Live: API https://tradeguard-api-9j2o.onrender.com (database OK), dashboard https://tradeguard-4c9.pages.dev.
+- Still to check: memory with several traders (512 MB).
 - The landing page line "Trades are paper only: no real money." was removed (user request).
 ### Loop summary
 - Pending until the site is live.

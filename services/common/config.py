@@ -90,6 +90,12 @@ class Settings(BaseModel):
     trader_token_secret: SecretStr | None = Field(default=None, alias="TRADER_TOKEN_SECRET")
     # Live prices for the trading desk (F10f): Yahoo Finance, polled politely.
     live_prices: bool = Field(default=True, alias="LIVE_PRICES")
+    # yahoo (no key; blocked from Render's servers) or finnhub (free key, F12). Without the
+    # key, finnhub falls back to replayed prices.
+    live_price_source: Literal["yahoo", "finnhub"] = Field(
+        default="yahoo", alias="LIVE_PRICE_SOURCE"
+    )
+    finnhub_api_key: SecretStr | None = Field(default=None, alias="FINNHUB_API_KEY")
     live_poll_seconds: float = Field(default=30, ge=10, le=3600, alias="LIVE_POLL_SECONDS")
     live_closed_poll_seconds: float = Field(
         default=300, ge=30, le=3600, alias="LIVE_CLOSED_POLL_SECONDS"

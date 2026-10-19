@@ -312,6 +312,7 @@ creates the tables. Open it with
 | Piece | Host (free plan, no card) | What it runs |
 |---|---|---|
 | API, trader sessions, gateway, live prices | Render web service (`render.yaml`, `Dockerfile`) | One container, 512 MB; migrates on start |
+| Live prices | Finnhub (free key) | Quotes, market status, news. Yahoo refuses Render's servers (D025) |
 | Postgres | Neon | Accounts, audit log, approvals; open it with psql, TablePlus or Neon's SQL editor |
 | Dashboard | Cloudflare Pages | The static React build; it calls the API with `VITE_API_URL` |
 | AI | Groq | `openai/gpt-oss-120b` acts, `openai/gpt-oss-20b` classifies and judges |
@@ -346,16 +347,18 @@ refuses to start without `ADMIN_PASSWORD`, `TRADER_TOKEN_SECRET` and the Groq ke
 2. **Neon:** sign up at neon.tech and create a project in AWS US West (Oregon), Postgres 16.
    Under *Connect*, turn **Connection pooling off** and copy the connection string (it ends
    in `?sslmode=require`).
-3. **Render:** in your existing account, connect GitHub, then *New → Blueprint* and pick
+3. **Finnhub:** sign up at finnhub.io and copy the free API key.
+4. **Render:** in your existing account, connect GitHub, then *New → Blueprint* and pick
    `dgkans/TradeGuard`.
    Render reads `render.yaml` and asks for:
    - `DATABASE_URL`: the Neon string;
    - `GROQ_API_KEY`;
+   - `FINNHUB_API_KEY` (without it the desk shows replayed prices);
    - `ADMIN_PASSWORD`: choose a strong one;
    - `CORS_ORIGINS`: type `https://example.com` for now.
 
    Deploy. The API gets an address like `https://tradeguard-api.onrender.com`.
-4. **Cloudflare Pages:** *Workers & Pages → Create → Pages → Connect to Git* and pick the
+5. **Cloudflare Pages:** *Workers & Pages → Create → Pages → Connect to Git* and pick the
    repo. Use:
    - root directory `dashboard`;
    - build command `npm ci && npm run check`;
@@ -363,7 +366,7 @@ refuses to start without `ADMIN_PASSWORD`, `TRADER_TOKEN_SECRET` and the Groq ke
    - environment variable `VITE_API_URL` set to the Render address.
 
    The site gets an address like `https://tradeguard.pages.dev`.
-5. **Back in Render:** set `CORS_ORIGINS` to the Pages address. Render redeploys.
+6. **Back in Render:** set `CORS_ORIGINS` to the Pages address. Render redeploys.
 
 Don't add an uptime ping: kept awake, the API alone would use about all of the
 workspace's 750 free hours, and Render then suspends every free service in it (including

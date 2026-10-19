@@ -714,3 +714,34 @@ Consequences and risks:
   a free Finnhub key as the fallback.
 - The eval numbers in RESULTS.md are for qwen3:8b on Ollama. The live site runs gpt-oss on
   Groq and has no eval numbers of its own (PLAN 15.2 rule 2).
+
+## D025: Finnhub for live prices on Render; Yahoo stays for local runs (F12)
+Date: 2026-10-19
+Decision:
+- **Yahoo refuses Render's servers.** Render's logs showed `RateLimitedError` (429) for all
+  20 symbols on every poll from the first minute; the same code works from a home
+  connection. Routing around the block (a proxy) was ruled out. The user chose Finnhub's
+  free plan, with replayed prices until the key exists.
+- `LIVE_PRICE_SOURCE=finnhub` on Render, `yahoo` locally. Without `FINNHUB_API_KEY` the
+  desk runs on replayed prices by itself, so a missing key never breaks the site.
+- **Each poll costs 1 market status call, 1 quote per symbol and 2 slow calls** in turn
+  (news, or price history). That's 23 calls every 30 s, under the free plan's ~60 a
+  minute; a 429 backs off for a minute.
+- **Finnhub's own open flag** decides market hours (holidays included); unknown or stale
+  means closed. The day's change uses Finnhub's previous close.
+- **Price history may be premium.** The feed probes candles once:
+  - With history, bars come from Finnhub.
+  - Without, 5 minute bars are built from collected quotes while the server is awake.
+    Daily bars are the saved fixture history plus today's live bar, so pattern checks run
+    on history that ends 16 Oct 2026, with a gap up to today.
+- **The key goes in the `X-Finnhub-Token` header**, never a URL or a log.
+- Replay-mode desk accounts are saved too (`DeskReplayMarket`). The sleeping free server
+  restarts on wake, and positions must survive that.
+Alternatives considered:
+- Tiingo: has history, but its current free limits are unconfirmed and refreshes would be
+  slower.
+- Twelve Data: about 800 calls a day, too few.
+- Replay only: no sign-up, but the user wants live prices.
+Consequences: without candle access, charts start thin after each wake and the pattern
+history has a gap; this is checked once the key exists.
+
