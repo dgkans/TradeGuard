@@ -244,6 +244,7 @@ D024–D025 explain the choices.
 | `migrations/` | Database schema (Alembic) |
 
 **Docs:**
+- [WORKFLOW.md](WORKFLOW.md): who's who, the architecture, a request traced end to end, and the deployment pipeline.
 - [TECH_STACK.md](TECH_STACK.md): every tool and what it's used for.
 - [PROJECT.md](PROJECT.md): a one-page overview.
 - [RESULTS.md](RESULTS.md): evaluation numbers.
