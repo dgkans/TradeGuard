@@ -54,7 +54,7 @@ describe("PositionsPage", () => {
     expect(within(orders).getByText("BUY")).toBeInTheDocument();
     expect(within(orders).getByText("$1,500")).toBeInTheDocument();
     expect(within(orders).getByText("filled")).toBeInTheDocument();
-    expect(portfolio).toHaveBeenCalledWith("web-asha-1");
+    expect(portfolio).toHaveBeenCalledWith();
     const donut = screen.getByRole("img", { name: /allocation/i });
     expect(donut).toHaveAccessibleName(/cash \$23,500/i);
     expect(donut).toHaveAccessibleName(/NVDA \$3,650/);

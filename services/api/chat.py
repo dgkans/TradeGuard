@@ -32,12 +32,15 @@ from services.agent.graph import AgentContext, build_graph, resume_turn, run_tur
 from services.agent.provenance import report_user_message
 from services.agent.tools import McpToolset, ToolCallLog
 from services.api import catalog
+from services.api.accounts import TraderStore
+from services.api.book import RecordingMarket, catch_up, replay
 from services.api.describe import (
     RULE_TITLES,
     describe_decision,
     describe_step,
     friendly_reason,
 )
+from services.api.desk import DeskClock
 from services.api.limits import LOCKED, Limits, limits_of, universe, with_limits
 from services.common.config import Settings, child_env
 from services.common.llm import make_chat_model
@@ -91,6 +94,7 @@ class ChatSpec:
     policy_path: Path
     user: str = "trader"
     starting_cash: float = 10000.0
+    trader_id: int | None = None  # an account (F10e): seeds the broker, owns the session
 
 
 @dataclass
@@ -125,6 +129,7 @@ class ChatSession:
         self.log = ToolCallLog(thread_id=session_id)
         self.market: Any | None = None
         self.gateway: Any | None = None
+        self.custom_limits: dict[str, Any] | None = None
         self._operator_token = secrets.token_urlsafe(24)
         self._meta = {OPERATOR_META_KEY: self._operator_token}
         self._jobs: asyncio.Queue[Job | None] = asyncio.Queue()
@@ -210,8 +215,9 @@ class ChatSession:
         return self._toolset
 
     def _let_orders_fill(self) -> None:
-        """The demo market moves on after a turn, so open orders can fill (no clock button)."""
-        if self.market is None:
+        """Without the shared desk clock (tests, CLI), the market moves on after a turn so
+        open orders can fill. With the clock (F10e) the clock moves every market."""
+        if self.market is None or self.service.clock is not None:
             return
         open_orders = self.market.list_orders("open")["orders"]
         if open_orders:
@@ -236,7 +242,9 @@ class ChatSession:
                 return result
 
             result = await self._submit(job)
-            return self._finish(result, start)
+            turn = self._finish(result, start)
+        await self.service.persist(self)
+        return turn
 
     async def resume(self) -> dict[str, Any]:
         """Wait for the human decision on the pending approval, then finish the turn."""
@@ -265,7 +273,8 @@ class ChatSession:
             self.transcript.append(decision)
             turn = self._finish(result, start)
             turn["decision"] = decision
-            return turn
+        await self.service.persist(self)
+        return turn
 
     def _finish(self, result: dict[str, Any], start: int) -> dict[str, Any]:
         steps = []
@@ -377,9 +386,23 @@ class ChatSession:
             reason=f"{self.spec.user} changed their limits",
         ))  # fmt: skip
         gateway.update_policy(policy)
+        self.custom_limits = limits.model_dump()
         self.transcript.append({"role": "decision", "status": "limits",
                                 "text": "Your limits were updated."})  # fmt: skip
+        await self.service.persist(self)
         return self.limits()
+
+    def restore(self, trader: Any) -> None:
+        """Bring back a saved account: order history, limits and the conversation."""
+        if isinstance(self.market, RecordingMarket) and trader.events:
+            replay(self.market, trader.events)
+        if trader.limits and self.gateway is not None:
+            limits = Limits(**trader.limits)
+            self.gateway.update_policy(with_limits(self._policy(), limits, self.spec.user))
+            self.custom_limits = limits.model_dump()
+        self.transcript = list(trader.transcript)
+        if self.service.clock is not None and self.market is not None:
+            catch_up(self.market, self.service.clock.now)
 
     def _policy(self) -> Policy:
         if self.gateway is None or self.gateway.policy is None:
@@ -437,6 +460,8 @@ class ChatService:
         poll_seconds: float = 0.5,
         model_name: str = "",
         paper_watchlist: list[str] | None = None,
+        clock: DeskClock | None = None,
+        store: TraderStore | None = None,
     ) -> None:
         self.connect = connect
         self.models = models
@@ -447,7 +472,47 @@ class ChatService:
         self.poll_seconds = poll_seconds
         self.model_name = model_name
         self.paper_watchlist = paper_watchlist
+        self.clock = clock
+        self.store = store
         self.sessions: dict[str, ChatSession] = {}
+        self._opening: dict[int, asyncio.Lock] = {}
+
+    async def open_trader(self, trader: Any) -> ChatSession:
+        """The trader's session: the open one, or a new one rebuilt from their account."""
+        session_id = f"web-{trader.id}-{slug(trader.username)}"
+        lock = self._opening.setdefault(trader.id, asyncio.Lock())
+        async with lock:  # two requests at once must not open two sessions
+            if session_id in self.sessions:
+                return self.sessions[session_id]
+            if len(self.sessions) >= self.max_sessions:
+                raise TooManySessionsError(
+                    f"at most {self.max_sessions} traders can be active at once; try later"
+                )
+            path = catalog.policy_path(self.repo_root, trader.profile)
+            if path is None:
+                raise ChatNotFoundError(f"no policy {trader.profile!r}")
+            spec = ChatSpec(DEFAULT_SCENARIO, True, trader.profile, path, trader.display_name,
+                            float(trader.starting_cash), trader.id)  # fmt: skip
+            session = ChatSession(session_id, spec, self)
+            await session.start()
+            session.restore(trader)
+            self.sessions[session_id] = session
+            return session
+
+    def sync(self, now: datetime) -> None:
+        """Move every open market to the shared desk time (fills and prices follow)."""
+        for session in self.sessions.values():
+            if session.market is not None:
+                catch_up(session.market, now)
+
+    async def persist(self, session: ChatSession) -> None:
+        """Save a trader's account (order history, limits, conversation)."""
+        trader_id = session.spec.trader_id
+        if self.store is None or trader_id is None:
+            return
+        events = list(getattr(session.market, "events", []) or [])
+        await self.store.save_state(trader_id, events=events, transcript=session.transcript,
+                                    limits=session.custom_limits)  # fmt: skip
 
     def paper_entry(self) -> dict[str, Any] | None:
         """The Alpaca paper "scenario", offered only when paper mode is configured."""
@@ -533,7 +598,6 @@ def inprocess_connector(
     from services.gateway.policy.model import load_policy
     from services.replay_server.scenario import load_scenario
     from services.replay_server.server import build_server
-    from services.replay_server.session import ReplaySession
 
     paper = stdio_connector(repo_root)
 
@@ -543,15 +607,18 @@ def inprocess_connector(
             async with paper(spec, session_id, token) as connection:
                 yield connection
             return
-        # A new trader's account: the cash they chose and no positions (F10c).
-        scenario = load_scenario(spec.scenario, repo_root / "scenarios").model_copy(
-            update={"starting_cash": spec.starting_cash, "positions": {}}
-        )
-        market = ReplaySession(
+        # A new trader's account: the cash they chose and no positions (F10c), a broker seed
+        # of their own (F10e), recording its orders so it can be rebuilt after a restart.
+        update: dict[str, Any] = {"starting_cash": spec.starting_cash, "positions": {}}
+        if spec.trader_id is not None:
+            update["seed"] = 100_000 + spec.trader_id
+        scenario = load_scenario(spec.scenario, repo_root / "scenarios").model_copy(update=update)
+        market = RecordingMarket(
             scenario,
             bars_root=repo_root / "fixtures/bars",
             news_root=repo_root / "fixtures/news",
         )
+        market.start_recording()
         upstream = build_server(market, dev_tools=True)
         if not spec.guarded:
             yield Connection(upstream, market)

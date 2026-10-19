@@ -23,13 +23,13 @@ const view: LimitsView = {
 
 function setup(overrides = {}) {
   const api = fakeApi({
-    limits: vi.fn(async (_id: string, template?: string) =>
+    limits: vi.fn(async (template?: string) =>
       template === "strict"
         ? { ...view, profile: "strict", limits: { ...view.limits, max_order_usd: 500,
                                                    approval_over_usd: 250,
                                                    allowed_symbols: ["AAPL", "MSFT", "SPY"] } }
         : view),
-    setLimits: vi.fn(async (_id: string, limits) => ({ ...view, limits })),
+    setLimits: vi.fn(async (limits: LimitsView["limits"]) => ({ ...view, limits })),
     stopped: vi.fn(async () => [{ rule_id: "max_order_notional", decision: "DENY" as const,
                                   count: 2, title: "Order is over your per-order limit" }]),
     ...overrides,
@@ -51,7 +51,7 @@ describe("LimitsPage", () => {
     await userEvent.type(perOrder, "1500");
     await userEvent.click(screen.getByRole("checkbox", { name: "MSFT" }));
     await userEvent.click(screen.getByRole("button", { name: /save my limits/i }));
-    expect(api.setLimits).toHaveBeenCalledWith("web-asha-1", {
+    expect(api.setLimits).toHaveBeenCalledWith({
       ...view.limits, max_order_usd: 1500, allowed_symbols: ["NVDA", "AMD", "AAPL", "MSFT"],
     });
     expect(await screen.findByText(/saved/i)).toBeInTheDocument();

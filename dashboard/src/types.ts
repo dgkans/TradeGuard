@@ -266,3 +266,36 @@ export interface MarketOverview {
   watchlist: MarketItem[];
   movers: { symbol: string; day_change_pct: number }[];
 }
+
+export interface TraderInfo {
+  id: number;
+  username: string;
+  display_name: string;
+  profile: string;
+  starting_cash: number;
+}
+
+export interface Me {
+  trader: TraderInfo | null;
+  session: SessionInfo;
+}
+
+export interface SignupForm {
+  username: string;
+  password: string;
+  display_name?: string;
+  starting_cash: number;
+  profile: string;
+}
+
+export interface DeskClock {
+  now: string | null;
+  ended: boolean;
+  live: boolean;
+}
+
+export interface AdminTrader extends TraderInfo {
+  active: boolean;
+  waiting_for_approval: boolean;
+  orders: number;
+}

@@ -59,7 +59,7 @@ export function LimitsPage({ session }: { session: SessionInfo }) {
 
   useEffect(() => {
     let live = true;
-    api.limits(sessionId).then(
+    api.limits().then(
       (data) => {
         if (!live) return;
         setView(data);
@@ -67,7 +67,7 @@ export function LimitsPage({ session }: { session: SessionInfo }) {
       },
       (failure: unknown) => live && setError(failure),
     );
-    api.stopped(sessionId).then((rules) => live && setStopped(rules), () => undefined);
+    api.stopped().then((rules) => live && setStopped(rules), () => undefined);
     return () => {
       live = false;
     };
@@ -102,7 +102,7 @@ export function LimitsPage({ session }: { session: SessionInfo }) {
 
   async function applyTemplate(policy: string) {
     try {
-      const template = await api.limits(sessionId, policy);
+      const template = await api.limits(policy);
       setDraft(template.limits);
       setSaved(false);
     } catch (failure) {
@@ -116,7 +116,7 @@ export function LimitsPage({ session }: { session: SessionInfo }) {
     setSaving(true);
     setError(null);
     try {
-      const result = await api.setLimits(sessionId, draft);
+      const result = await api.setLimits(draft);
       setView(result);
       setDraft(result.limits);
       setSaved(true);

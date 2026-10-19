@@ -137,14 +137,6 @@ pre {
   color: var(--brand);
 }
 
-.mode-pill {
-  padding: 2px 10px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
 nav {
   display: flex;
   min-width: 0;
@@ -887,49 +879,38 @@ tbody th {
   list-style: none;
 }
 
-.trader {
+.account-card {
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  grid-template-areas: "name name end" "dot status end";
-  align-items: center;
-  gap: 2px 8px;
-  padding: 8px 10px;
+  gap: 6px;
+  padding: 12px;
   border: 1px solid var(--border);
-  border-radius: 10px;
-}
-
-.trader-active {
-  border-color: var(--brand);
+  border-radius: var(--radius);
   box-shadow: inset 3px 0 0 var(--brand);
 }
 
-.trader-name {
-  grid-area: name;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--text);
-  font: inherit;
-  font-weight: 700;
-  text-align: left;
-  cursor: pointer;
+.account-name {
+  font-size: 16px;
 }
 
-.trader .dot {
-  grid-area: dot;
+.account-card .facts {
+  margin: 6px 0;
 }
 
-.trader-status {
-  grid-area: status;
+.clock-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
   color: var(--muted);
   font-size: 12px;
+  white-space: nowrap;
 }
 
-.trader .end {
-  grid-area: end;
-  color: var(--deny);
-  font-size: 13px;
-  text-decoration: none;
+.dot-live {
+  background: var(--allow);
+  animation: pulse 2s ease-in-out infinite;
 }
 
 .dot {
@@ -2041,4 +2022,11 @@ nav {
   flex: 1;
   height: auto;
   min-height: 72px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot-busy,
+  .dot-live {
+    animation: none;
+  }
 }

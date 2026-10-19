@@ -40,7 +40,7 @@ describe("ChatPage", () => {
     }));
     const { container } = renderWith(fakeApi({ session: vi.fn(async () => state()), send }));
     await say("What is NVDA at?");
-    expect(send).toHaveBeenCalledWith("web-asha-1", "What is NVDA at?");
+    expect(send).toHaveBeenCalledWith("What is NVDA at?");
     expect(await screen.findByText("Checked NVDA: $212.74")).toBeInTheDocument();
     expect(screen.getByText("$212.74", { selector: "strong" })).toBeInTheDocument();
     expect(screen.getByText("up 1% today", { selector: "li" })).toBeInTheDocument();
@@ -89,9 +89,9 @@ describe("ChatPage", () => {
     const box = await screen.findByRole("article", { name: /needs your approval/i });
     expect(within(box).getByText("buy $1,500 of NVDA")).toBeInTheDocument();
     expect(within(box).getByText(/over the approval threshold/)).toBeInTheDocument();
-    expect(resume).toHaveBeenCalledWith("web-asha-1");
+    expect(resume).toHaveBeenCalledWith();
     await userEvent.click(within(box).getByRole("button", { name: /approve/i }));
-    expect(approveOwn).toHaveBeenCalledWith("web-asha-1", "apr_1", "");
+    expect(approveOwn).toHaveBeenCalledWith("apr_1", "");
     expect(await screen.findByText("Done: bought $1,500 of NVDA.")).toBeInTheDocument();
     expect(screen.getByText(/Approved\. The order was sent\./)).toBeInTheDocument();
   });

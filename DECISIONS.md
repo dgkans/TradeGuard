@@ -593,3 +593,31 @@ Alternatives considered:
 Consequences: anyone at the local URL can start or end any trader session (no trader
 accounts). That's acceptable for a local demo; a public deployment needs per-trader
 identity (F12).
+
+## D022: Trader accounts in Postgres and a live replayed market (F10e)
+Date: 2026-10-18
+Decision:
+- **Accounts in Postgres** (user choice: "Postgres + passwords"). Tables `traders` and
+  `desk_state` (migration 0004).
+  - Passwords are hashed with scrypt from the standard library (n=2^14, r=8, p=1, 16 byte
+    salt) and checked in constant time.
+  - Tokens are `<trader id>.<expiry ms>.<HMAC-SHA256>`, signed with `TRADER_TOKEN_SECRET`,
+    and expire after 7 days. 5 wrong passwords lock a username for 5 minutes.
+  - Every `/me/*` route serves only the token's own session.
+- **Accounts are event sourced, not serialized.** The replay broker is deterministic per
+  trader seed, so each account stores its order history (place/cancel plus market time).
+  A restore replays the history and then catches up to the shared clock. If an order id
+  doesn't reproduce, the restore fails loudly instead of guessing.
+- **One shared replayed clock** (user choice: "Replay plays forward live").
+  - It starts Thu 1 Oct 2026 10:30 ET and moves 5 market minutes per tick (default 30 s).
+  - It skips nights and weekends and stops at the end of the data (16 Oct 2026).
+  - It is saved in `desk_state`. The UI labels it "Replayed market", never as today.
+Alternatives considered:
+- No accounts (session per browser): loses everything on restart.
+- JSON file store: no concurrency control; Postgres is already running.
+- Pickling broker state: brittle across code changes; event replay is checkable.
+- An OAuth provider: needs a third-party sign up, against the user's privacy preference.
+- A per-trader clock: charts and fills would disagree between traders.
+Consequences: agent memory (LangGraph checkpointer) is still in memory, so the agent
+forgets earlier turns after a restart even though the visible chat is restored. There is
+no password reset; the admin can see accounts but not passwords.

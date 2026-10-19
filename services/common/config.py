@@ -76,6 +76,8 @@ class Settings(BaseModel):
     api_port: int = Field(default=8000, gt=0, lt=65536, alias="API_PORT")
     jaeger_ui_url: str = Field(default="http://localhost:16686", alias="JAEGER_UI_URL")
     admin_password: SecretStr | None = Field(default=None, alias="ADMIN_PASSWORD")
+    trader_token_secret: SecretStr | None = Field(default=None, alias="TRADER_TOKEN_SECRET")
+    desk_tick_seconds: float = Field(default=30, ge=1, le=3600, alias="DESK_TICK_SECONDS")
     paper_watchlist: str = Field(default="NVDA,AMD,AAPL,MSFT,TSLA", alias="PAPER_WATCHLIST")
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(

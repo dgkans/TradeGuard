@@ -7,18 +7,11 @@ export function fakeApi(overrides: Partial<Api> = {}): Api {
   const notMocked = (name: string) =>
     vi.fn(() => Promise.reject(new Error(`${name} not mocked in this test`)));
   const base: Api = {
-    listApprovals: notMocked("listApprovals"),
-    approve: notMocked("approve"),
-    reject: notMocked("reject"),
-    audit: notMocked("audit"),
-    rulesFired: notMocked("rulesFired"),
-    policies: notMocked("policies"),
-    policy: notMocked("policy"),
-    evals: notMocked("evals"),
-    latestEval: notMocked("latestEval"),
-    scenarios: notMocked("scenarios"),
-    sessions: notMocked("sessions"),
-    createSession: notMocked("createSession"),
+    signup: notMocked("signup"),
+    login: notMocked("login"),
+    logout: vi.fn(async () => undefined),
+    isTrader: vi.fn(() => false),
+    me: notMocked("me"),
     session: notMocked("session"),
     send: notMocked("send"),
     resume: notMocked("resume"),
@@ -29,10 +22,21 @@ export function fakeApi(overrides: Partial<Api> = {}): Api {
     setLimits: notMocked("setLimits"),
     stopped: notMocked("stopped"),
     marketOverview: notMocked("marketOverview"),
+    deskClock: notMocked("deskClock"),
     adminLogin: notMocked("adminLogin"),
     adminLogout: vi.fn(),
     isAdmin: vi.fn(() => false),
-    closeSession: notMocked("closeSession"),
+    traders: notMocked("traders"),
+    listApprovals: notMocked("listApprovals"),
+    approve: notMocked("approve"),
+    reject: notMocked("reject"),
+    audit: notMocked("audit"),
+    rulesFired: notMocked("rulesFired"),
+    policies: notMocked("policies"),
+    policy: notMocked("policy"),
+    evals: notMocked("evals"),
+    latestEval: notMocked("latestEval"),
+    scenarios: notMocked("scenarios"),
   };
   return { ...base, ...overrides };
 }
@@ -40,7 +44,7 @@ export function fakeApi(overrides: Partial<Api> = {}): Api {
 export function approval(overrides: Partial<Approval> = {}): Approval {
   return {
     id: "apr_1",
-    session_id: "web-demo-1",
+    session_id: "web-1-asha",
     tool: "place_order",
     args: { symbol: "NVDA", side: "buy", notional: 1500 },
     rule_id: "approval_notional",
@@ -61,7 +65,7 @@ export function auditEvent(overrides: Partial<AuditEvent> = {}): AuditEvent {
   return {
     id: 1,
     created_at: "2026-10-18T15:00:00+00:00",
-    session_id: "web-demo-1",
+    session_id: "web-1-asha",
     upstream: "replay",
     tool: "place_order",
     args: { symbol: "NVDA", side: "buy", notional: 3000 },

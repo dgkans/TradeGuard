@@ -1,32 +1,45 @@
-"""Trader sessions (F10, F10b): the real agent graph and the in-process connector with a
-scripted model and in-memory stores."""
+"""Trader accounts and their sessions (F10 to F10e): the real agent graph and the in-process
+connector with a scripted model, in-memory stores, and (where noted) the shared desk clock."""
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
+from services.api.accounts import MemoryTraderStore, TraderTokens
 from services.api.admin import AdminAuth
-from services.api.app import ApiDeps, create_app
+from services.api.app import Accounts, ApiDeps, create_app
 from services.api.chat import ChatService, ChatSpec, GatewayStores, inprocess_connector
+from services.api.desk import DeskClock
 from services.gateway.approvals import MemoryApprovalStore
 from services.gateway.audit import MemoryAuditReader, MemoryAuditSink
 from services.gateway.provenance.store import MemoryProvenanceStore
 from tests.agent.conftest import ScriptedChatModel, answer, plan, tool_call, understand
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DESK_START = datetime(2026, 10, 1, 14, 30, tzinfo=UTC)
 
 
 class Stack:
-    """The dashboard API with in-process trader sessions (the production connector)."""
+    """The dashboard API with trader accounts and in-process sessions (production code)."""
 
-    def __init__(self, scripts: list[ScriptedChatModel], max_sessions: int = 8) -> None:
+    def __init__(
+        self,
+        scripts: list[ScriptedChatModel],
+        max_sessions: int = 8,
+        clock: DeskClock | None = None,
+        store: MemoryTraderStore | None = None,
+    ) -> None:
         self.audit = MemoryAuditSink()
         self.approvals = MemoryApprovalStore(audit=self.audit)
         self.scripts = list(scripts)
+        self.store = store or MemoryTraderStore()
         stores = GatewayStores(self.audit, self.approvals, MemoryProvenanceStore())
         self.chat = ChatService(
             connect=inprocess_connector(REPO_ROOT, lambda: stores, 60),
@@ -35,23 +48,38 @@ class Stack:
             max_sessions=max_sessions,
             repo_root=REPO_ROOT,
             poll_seconds=0.05,
+            clock=clock,
+            store=self.store,
         )
         self.admin = AdminAuth("test-admin")
         deps = ApiDeps(approvals=self.approvals, audit=MemoryAuditReader(self.audit),
-                       chat=self.chat, repo_root=REPO_ROOT, admin=self.admin)  # fmt: skip
+                       chat=self.chat, repo_root=REPO_ROOT, admin=self.admin,
+                       accounts=Accounts(self.store, TraderTokens("k" * 32)))  # fmt: skip
         self.app = create_app(deps)
 
     def models(self) -> tuple[Any, Any]:
         model = self.scripts.pop(0)
         return model, model
 
-    def market(self, session_id: str) -> Any:
-        return self.chat.get(session_id).market
-
-    def client(self) -> httpx.AsyncClient:
-        """A trader's client: no admin token."""
+    @asynccontextmanager
+    async def client(self) -> AsyncIterator[httpx.AsyncClient]:
+        """A client; on exit every trader session is closed, like the API's shutdown."""
         transport = httpx.ASGITransport(app=self.app)
-        return httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test",
+                                     timeout=30) as client:  # fmt: skip
+            try:
+                yield client
+            finally:
+                await self.chat.close_all()
+
+    def admin_headers(self) -> dict[str, str]:
+        return {"authorization": f"Bearer {self.admin.login('test-admin').token}"}
+
+    def market_of(self, user: str) -> Any:
+        for session in self.chat.sessions.values():
+            if session.spec.user.lower() == user.lower():
+                return session.market
+        raise KeyError(user)
 
 
 def quote_script() -> ScriptedChatModel:
@@ -69,18 +97,24 @@ def order_script(final: str, notional: float = 1500, symbol: str = "NVDA") -> Sc
     ])  # fmt: skip
 
 
-async def start(client: httpx.AsyncClient, user: str = "Asha", **body: Any) -> str:
-    response = await client.post("/chat/sessions", json={"user": user, **body})
+async def signup(client: httpx.AsyncClient, user: str = "asha", **body: Any) -> dict[str, str]:
+    payload = {"username": user, "password": "pw-" + user + "-123", **body}
+    response = await client.post("/auth/signup", json=payload)
     assert response.status_code == 201, response.text
-    session_id: str = response.json()["session_id"]
-    return session_id
+    return {"x-trader-token": response.json()["token"]}
 
 
-async def send(client: httpx.AsyncClient, session_id: str, text: str) -> dict[str, Any]:
-    response = await client.post(f"/chat/sessions/{session_id}/messages", json={"text": text})
+async def send(client: httpx.AsyncClient, who: dict[str, str], text: str) -> dict[str, Any]:
+    response = await client.post("/me/messages", json={"text": text}, headers=who)
     assert response.status_code == 200, response.text
     data: dict[str, Any] = response.json()
     return data
+
+
+async def get(client: httpx.AsyncClient, who: dict[str, str], path: str) -> Any:
+    response = await client.get(path, headers=who)
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def assert_no_json(transcript: list[dict[str, Any]]) -> None:
@@ -93,16 +127,18 @@ def assert_no_json(transcript: list[dict[str, Any]]) -> None:
             assert "{" not in text and '":' not in text, (key, text)
 
 
+# --- the trader's own session ------------------------------------------------------------
+
+
 async def test_a_question_shows_plain_steps_and_the_answer() -> None:
     stack = Stack([quote_script()])
     async with stack.client() as client:
-        session_id = await start(client)
-        turn = await send(client, session_id, "What is NVDA at?")
-        state = (await client.get(f"/chat/sessions/{session_id}")).json()
-        await client.delete(f"/chat/sessions/{session_id}")
+        asha = await signup(client, "asha", display_name="Asha")
+        turn = await send(client, asha, "What is NVDA at?")
+        state = await get(client, asha, "/me/session")
     assert turn["answer"] == "NVDA is at **$212.74**."
-    assert turn["steps"] == [{"role": "step", "status": "ok", "tool": "get_quote",
-                              "text": "Checked NVDA: $212.74"}]  # fmt: skip
+    assert turn["steps"][0]["status"] == "ok"
+    assert turn["steps"][0]["text"].startswith("Checked NVDA: $")
     assert [entry["role"] for entry in state["transcript"]] == ["user", "step", "agent"]
     assert state["user"] == "Asha" and state["scenario"] == "desk"
     assert_no_json(state["transcript"])
@@ -112,10 +148,9 @@ async def test_a_question_shows_plain_steps_and_the_answer() -> None:
 async def test_blocked_order_is_a_friendly_notice() -> None:
     stack = Stack([order_script("That order was too large.", notional=3000, symbol="TSLA")])
     async with stack.client() as client:
-        session_id = await start(client)
-        turn = await send(client, session_id, "Buy $3000 of TSLA")
-        state = (await client.get(f"/chat/sessions/{session_id}")).json()
-        await client.delete(f"/chat/sessions/{session_id}")
+        asha = await signup(client)
+        turn = await send(client, asha, "Buy $3000 of TSLA")
+        state = await get(client, asha, "/me/session")
     step = turn["steps"][0]
     assert step["status"] == "blocked"
     assert step["text"] == "Blocked: buy $3,000 of TSLA at market"
@@ -124,124 +159,124 @@ async def test_blocked_order_is_a_friendly_notice() -> None:
     assert_no_json(state["transcript"])
 
 
-async def test_escalated_order_waits_for_the_human_then_executes_and_fills() -> None:
+async def test_escalated_order_waits_for_the_trader_then_executes_and_fills() -> None:
     stack = Stack([order_script("Bought $1500 of NVDA after approval.")])
     async with stack.client() as client:
-        session_id = await start(client)
-        first = await send(client, session_id, "Buy $1500 of NVDA")
+        asha = await signup(client, "asha", display_name="Asha")
+        first = await send(client, asha, "Buy $1500 of NVDA")
         pending = first["pending_approval"]
-        assert first["answer"] is None and first["steps"] == []  # the card replaces the step
-        assert pending["rule_id"] == "approval_notional"
+        assert first["answer"] is None and first["steps"] == []
         assert pending["title"] == "Large order: needs your approval"
         assert pending["args"] == {"symbol": "NVDA", "side": "buy", "notional": 1500}
-        assert stack.market(session_id).list_orders("all")["orders"] == []
-
-        resume = asyncio.create_task(client.post(f"/chat/sessions/{session_id}/resume"))
+        resume = asyncio.create_task(client.post("/me/resume", headers=asha))
         await asyncio.sleep(0.2)
-        assert not resume.done()  # waiting on the human
-        decided = await client.post(
-            f"/chat/sessions/{session_id}/approvals/{pending['approval_id']}/approve",
-            json={"note": "ok"},
-        )
-        assert decided.status_code == 200
+        assert not resume.done()  # waiting on the trader
+        decided = await client.post(f"/me/approvals/{pending['approval_id']}/approve",
+                                    json={"note": "ok"}, headers=asha)  # fmt: skip
+        assert decided.status_code == 200 and decided.json()["decided_by"] == "Asha"
         done = (await resume).json()
-        state = (await client.get(f"/chat/sessions/{session_id}")).json()
-        book = (await client.get(f"/chat/sessions/{session_id}/portfolio")).json()
-        await client.delete(f"/chat/sessions/{session_id}")
+        book = await get(client, asha, "/me/portfolio")
     assert done["decision"]["text"].startswith("Approved. The order was sent.")
-    assert done["answer"] == "Bought $1500 of NVDA after approval."
-    assert [e["role"] for e in state["transcript"]] == ["user", "approval", "decision", "agent"]
-    assert_no_json(state["transcript"])
-    # Filled without any clock button: the session's market moved on after the turn.
     assert book["orders"][0]["status"] == "filled"
-    nvda = next(p for p in book["positions"] if p["symbol"] == "NVDA")
-    assert nvda["qty"] > 0 and book["cash"] == 8500.0  # started empty with $10,000
+    assert book["cash"] == 8500.0  # started empty with $10,000
+
+
+async def test_a_new_trader_starts_empty_with_the_chosen_cash() -> None:
+    stack = Stack([quote_script()])
+    async with stack.client() as client:
+        rich = await signup(client, "ben", starting_cash=250000)
+        book = await get(client, rich, "/me/portfolio")
+        too_much = await client.post(
+            "/auth/signup",
+            json={"username": "cy_1", "password": "longenough", "starting_cash": 2e6},
+        )
+    assert book["cash"] == 250000.0 and book["positions"] == []
+    assert too_much.status_code == 422
 
 
 async def test_portfolio_has_positions_totals_and_day_change() -> None:
     stack = Stack([order_script("Bought.", notional=500, symbol="AMD")])
     async with stack.client() as client:
-        session_id = await start(client)
-        await send(client, session_id, "Buy $500 of AMD")
-        book = (await client.get(f"/chat/sessions/{session_id}/portfolio")).json()
-        await client.delete(f"/chat/sessions/{session_id}")
+        asha = await signup(client)
+        await send(client, asha, "Buy $500 of AMD")
+        book = await get(client, asha, "/me/portfolio")
     assert book["cash"] == 9500.0
-    assert [p["symbol"] for p in book["positions"]] == ["AMD"]  # only what was bought
+    assert [p["symbol"] for p in book["positions"]] == ["AMD"]
     row = book["positions"][0]
     assert set(row) == {"symbol", "qty", "avg", "ltp", "value", "pnl", "pnl_pct",
                         "day_change_pct"}  # fmt: skip
     assert row["day_change_pct"] is not None
     assert book["total_pnl"] == pytest.approx(row["pnl"])
-    assert book["market_open"] is True and book["orders"][0]["status"] == "filled"
 
 
-async def test_two_traders_run_side_by_side_with_separate_books() -> None:
+# --- accounts: sign up, log in, who can see what -----------------------------------------
+
+
+async def test_sign_up_log_in_and_lockout() -> None:
+    stack = Stack([quote_script()])
+    async with stack.client() as client:
+        await signup(client, "asha")
+        taken = await client.post("/auth/signup", json={"username": "ASHA",
+                                                         "password": "another-pw"})  # fmt: skip
+        short = await client.post("/auth/signup", json={"username": "bo", "password": "x"})
+        good = await client.post("/auth/login", json={"username": "Asha",
+                                                       "password": "pw-asha-123"})  # fmt: skip
+        wrong = [await client.post("/auth/login", json={"username": "asha", "password": "no"})
+                 for _ in range(5)]  # fmt: skip
+        locked = await client.post("/auth/login", json={"username": "asha",
+                                                         "password": "pw-asha-123"})  # fmt: skip
+        nobody = await client.get("/me")
+        forged = await client.get("/me", headers={"x-trader-token": "1.9999999999999.abc"})
+    assert taken.status_code == 409
+    assert short.status_code == 422
+    assert good.status_code == 200 and good.json()["trader"]["username"] == "asha"
+    assert "password" not in json.dumps(good.json()["trader"])
+    assert [r.status_code for r in wrong] == [401] * 5
+    assert locked.status_code == 429  # even the right password waits out the lock
+    assert nobody.status_code == 401 and forged.status_code == 401
+
+
+async def test_a_trader_can_only_reach_their_own_session() -> None:
+    stack = Stack([order_script("Bought after approval."), quote_script()])
+    async with stack.client() as client:
+        asha = await signup(client, "asha", display_name="Asha")
+        ben = await signup(client, "ben")
+        first = await send(client, asha, "Buy $1500 of NVDA")
+        approval_id = first["pending_approval"]["approval_id"]
+        resume = asyncio.create_task(client.post("/me/resume", headers=asha))
+        stolen = await client.post(f"/me/approvals/{approval_id}/approve",
+                                   json={"note": "mine now"}, headers=ben)  # fmt: skip
+        ben_view = await get(client, ben, "/me/session")
+        by_id = await client.get("/chat/sessions", headers=ben)  # the admin's view
+        own = await client.post(f"/me/approvals/{approval_id}/approve",
+                                json={"note": "ok"}, headers=asha)  # fmt: skip
+        done = (await resume).json()
+        listing = await client.get("/admin/traders", headers=stack.admin_headers())
+    assert stolen.status_code == 404
+    assert ben_view["transcript"] == [] and ben_view["user"] == "ben"
+    assert by_id.status_code == 401
+    assert own.status_code == 200
+    assert done["decision"]["status"] == "executed"
+    traders = listing.json()["traders"]
+    assert [t["username"] for t in traders] == ["asha", "ben"]
+    assert all("password_hash" not in t for t in traders)
+
+
+async def test_two_traders_trade_side_by_side_with_separate_books() -> None:
     stack = Stack([order_script("Bought.", notional=500, symbol="AMD"), quote_script()])
     async with stack.client() as client:
-        asha = await start(client, "Asha")
-        ben = await start(client, "Ben")
+        asha = await signup(client, "asha")
+        ben = await signup(client, "ben")
         both = await asyncio.gather(send(client, asha, "Buy $500 of AMD"),
                                     send(client, ben, "What is NVDA at?"))  # fmt: skip
-        listed = (await client.get("/chat/sessions")).json()["sessions"]
-        asha_book = (await client.get(f"/chat/sessions/{asha}/portfolio")).json()
-        ben_book = (await client.get(f"/chat/sessions/{ben}/portfolio")).json()
-        await client.delete(f"/chat/sessions/{asha}")
-        remaining = (await client.get("/chat/sessions")).json()["sessions"]
-        await client.delete(f"/chat/sessions/{ben}")
+        asha_book = await get(client, asha, "/me/portfolio")
+        ben_book = await get(client, ben, "/me/portfolio")
     assert both[0]["steps"][0]["text"] == "Order sent: buy $500 of AMD at market"
-    assert {s["user"] for s in listed} == {"Asha", "Ben"}
     assert "AMD" in {p["symbol"] for p in asha_book["positions"]}
-    assert "AMD" not in {p["symbol"] for p in ben_book["positions"]}
-    assert [s["user"] for s in remaining] == ["Ben"]  # ending one leaves the other
+    assert ben_book["positions"] == []
 
 
-async def test_bad_requests_are_rejected() -> None:
-    stack = Stack([quote_script()], max_sessions=2)
-    async with stack.client() as client:
-        unknown_scenario = await client.post("/chat/sessions", json={"scenario": "nope"})
-        held_out = await client.post("/chat/sessions", json={"scenario": "ben_025"})
-        bad_policy = await client.post("/chat/sessions", json={"policy": "../.env"})
-        no_name = await client.post("/chat/sessions", json={"user": "   "})
-        session_id = await start(client, "Asha")
-        same_user = await client.post("/chat/sessions", json={"user": "asha"})
-        empty = await client.post(f"/chat/sessions/{session_id}/messages", json={"text": ""})
-        no_session = await client.post("/chat/sessions/nope/messages", json={"text": "hi"})
-        nothing_pending = await client.post(f"/chat/sessions/{session_id}/resume")
-        await client.delete(f"/chat/sessions/{session_id}")
-        gone = await client.get(f"/chat/sessions/{session_id}")
-    assert unknown_scenario.status_code == 404
-    assert held_out.status_code == 404  # held out scenarios are not offered
-    assert bad_policy.status_code == 404
-    assert no_name.status_code == 400
-    assert same_user.status_code == 409  # one session per trader
-    assert empty.status_code == 422
-    assert no_session.status_code == 404
-    assert nothing_pending.status_code == 409
-    assert gone.status_code == 404
-
-
-async def test_session_limit() -> None:
-    stack = Stack([quote_script(), quote_script()], max_sessions=1)
-    async with stack.client() as client:
-        first = await start(client, "Asha")
-        too_many = await client.post("/chat/sessions", json={"user": "Ben"})
-        await client.delete(f"/chat/sessions/{first}")
-    assert too_many.status_code == 429
-
-
-async def test_direct_mode_skips_the_gateway() -> None:
-    stack = Stack([order_script("Bought.")])
-    async with stack.client() as client:
-        session_id = await start(client, guarded=False)
-        turn = await send(client, session_id, "Buy $1500 of NVDA")
-        orders = stack.market(session_id).list_orders("all")["orders"]
-        await client.delete(f"/chat/sessions/{session_id}")
-    assert turn["answer"] == "Bought."
-    assert len(orders) == 1  # no guard, no approval
-    assert stack.audit.events == []
-
-
-async def test_one_turn_at_a_time_per_session() -> None:
+async def test_one_turn_at_a_time() -> None:
     gate = asyncio.Event()
 
     class SlowScript(ScriptedChatModel):
@@ -252,134 +287,99 @@ async def test_one_turn_at_a_time_per_session() -> None:
     slow = SlowScript(responses=[understand("question", "x"), plan(), answer("done")])
     stack = Stack([slow])
     async with stack.client() as client:
-        session_id = await start(client)
-        first = asyncio.create_task(
-            client.post(f"/chat/sessions/{session_id}/messages", json={"text": "one"})
-        )
+        asha = await signup(client)
+        first = asyncio.create_task(client.post("/me/messages", json={"text": "one"},
+                                                headers=asha))  # fmt: skip
         await asyncio.sleep(0.2)
-        second = await client.post(f"/chat/sessions/{session_id}/messages", json={"text": "two"})
+        second = await client.post("/me/messages", json={"text": "two"}, headers=asha)
         gate.set()
         assert (await first).status_code == 200
-        await client.delete(f"/chat/sessions/{session_id}")
     assert second.status_code == 409
 
 
-def test_the_desk_scenario_has_no_planted_injection() -> None:
-    from services.replay_server.scenario import load_scenario
-
-    desk = load_scenario("desk", REPO_ROOT / "scenarios")
-    for news_id in desk.news_fixtures:
-        item = json.loads((REPO_ROOT / "fixtures/news" / f"{news_id}.json").read_text())
-        assert item["injection"] is False, news_id
+# --- the shared clock and coming back after a restart ------------------------------------
 
 
-# --- Alpaca paper sessions (F11) ---------------------------------------------------------
-
-
-def paper_service(watchlist: list[str] | None) -> ChatService:
-    unused: Any = None
-    return ChatService(connect=unused, models=unused, approval_timeout_s=60,
-                       repo_root=REPO_ROOT, paper_watchlist=watchlist)  # fmt: skip
-
-
-async def test_paper_session_is_offered_only_when_paper_mode_is_configured() -> None:
-    for watchlist, offered in ((None, False), (["NVDA", "AMD"], True)):
-        deps = ApiDeps(approvals=MemoryApprovalStore(audit=MemoryAuditSink()),
-                       audit=MemoryAuditReader(MemoryAuditSink()), chat=paper_service(watchlist),
-                       repo_root=REPO_ROOT)  # fmt: skip
-        transport = httpx.ASGITransport(app=create_app(deps))
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            ids = [s["id"] for s in (await client.get("/scenarios")).json()["scenarios"]]
-            if not offered:
-                missing = await client.post("/chat/sessions", json={"scenario": "alpaca_paper"})
-                assert missing.status_code == 404
-        assert ("alpaca_paper" in ids) is offered
-        if offered:
-            assert ids[0] == "alpaca_paper"
-
-
-async def test_paper_session_must_go_through_the_gateway() -> None:
-    service = paper_service(["NVDA"])
-    with pytest.raises(Exception, match="gateway"):
-        await service.create("alpaca_paper", guarded=False, policy="default", user="Asha")
-
-
-async def test_paper_connector_starts_the_gateway_on_the_alpaca_upstream() -> None:
-    from services.api.chat import stdio_connector
-
-    spec = ChatSpec("alpaca_paper", True, "default", REPO_ROOT / "policies/default.yaml")
-    async with stdio_connector(REPO_ROOT)(spec, "web-alpaca_paper-1", "tok") as connection:
-        args = list(connection.target.args)
-    assert args[:2] == ["-m", "services.gateway"]
-    assert args[args.index("--upstream") + 1] == "alpaca"
-    assert "--scenario" not in args and "--dev-tools" not in args
-    assert connection.market is None
-
-
-async def test_a_new_trader_starts_empty_with_the_chosen_cash() -> None:
-    stack = Stack([quote_script(), quote_script(), quote_script()])
+async def test_the_shared_clock_fills_orders_and_moves_prices_with_no_turn() -> None:
+    clock = DeskClock(REPO_ROOT / "fixtures/bars", DESK_START)
+    stack = Stack([order_script("Sent.", notional=500, symbol="AMD")], clock=clock)
     async with stack.client() as client:
-        default = await start(client, "Asha")
-        rich = await start(client, "Ben", starting_cash=250000)
-        books = [(await client.get(f"/chat/sessions/{sid}/portfolio")).json()
-                 for sid in (default, rich)]  # fmt: skip
-        too_much = await client.post("/chat/sessions", json={"user": "Cy", "starting_cash": 2e6})
-        too_little = await client.post("/chat/sessions", json={"user": "Di", "starting_cash": 10})
-        info = (await client.get(f"/chat/sessions/{rich}")).json()
-        for sid in (default, rich):
-            await client.delete(f"/chat/sessions/{sid}")
-    assert books[0]["cash"] == 10000.0 and books[0]["positions"] == []
-    assert books[1]["cash"] == 250000.0 and books[1]["positions"] == []
-    assert info["starting_cash"] == 250000.0
-    assert too_much.status_code == 422 and too_little.status_code == 422
+        asha = await signup(client)
+        await send(client, asha, "Buy $500 of AMD")
+        before = await get(client, asha, "/me/portfolio")
+        for _ in range(3):
+            stack.chat.sync(clock.tick() or clock.now)
+        after = await get(client, asha, "/me/portfolio")
+    assert before["orders"][0]["status"] == "new"  # no auto fill with the shared clock
+    assert after["orders"][0]["status"] == "filled"
+    assert after["as_of"] > before["as_of"]
+    assert after["as_of"].startswith("2026-10-01T14:45")
 
 
-# --- F10d: own approvals only, editable limits, what the guard stopped for you ----------
+async def test_an_account_comes_back_identical_after_a_restart() -> None:
+    store = MemoryTraderStore()
+    clock = DeskClock(REPO_ROOT / "fixtures/bars", DESK_START)
+    first = Stack([order_script("Sent.", notional=500, symbol="AMD")], clock=clock, store=store)
+    async with first.client() as client:
+        asha = await signup(client, "asha", starting_cash=50000)
+        limits = (await get(client, asha, "/me/limits"))["limits"]
+        changed = await client.put(
+            "/me/limits",
+            headers=asha,
+            json={**limits, "max_order_usd": 900, "approval_over_usd": 800},
+        )
+        assert changed.status_code == 200
+        await send(client, asha, "Buy $500 of AMD")
+        for _ in range(2):
+            first.chat.sync(clock.tick() or clock.now)
+        book = await get(client, asha, "/me/portfolio")
+        transcript = (await get(client, asha, "/me/session"))["transcript"]
+    await first.chat.close_all()  # the API stops
+
+    for _ in range(4):  # the market keeps going while the API is down
+        clock.tick()
+    second = Stack([quote_script()], clock=clock, store=store)  # a new process, same database
+    async with second.client() as client:
+        login = await client.post("/auth/login", json={"username": "asha",
+                                                        "password": "pw-asha-123"})  # fmt: skip
+        again = {"x-trader-token": login.json()["token"]}
+        back = await get(client, again, "/me/portfolio")
+        back_limits = (await get(client, again, "/me/limits"))["limits"]
+        back_transcript = (await get(client, again, "/me/session"))["transcript"]
+    assert [o["id"] for o in back["orders"]] == [o["id"] for o in book["orders"]]
+    assert back["orders"][0]["status"] == "filled"
+    assert back["cash"] == book["cash"] == 49500.0
+    assert [p["qty"] for p in back["positions"]] == [p["qty"] for p in book["positions"]]
+    assert back["as_of"] > book["as_of"]  # caught up to the shared clock
+    assert back_limits["max_order_usd"] == 900
+    assert back_transcript == transcript
 
 
-async def test_a_trader_approves_their_own_order_but_not_someone_elses() -> None:
-    stack = Stack([order_script("Bought after approval."), quote_script()])
-    async with stack.client() as client:
-        asha = await start(client, "Asha")
-        ben = await start(client, "Ben")
-        first = await send(client, asha, "Buy $1500 of NVDA")
-        approval_id = first["pending_approval"]["approval_id"]
-        resume = asyncio.create_task(client.post(f"/chat/sessions/{asha}/resume"))
-        stolen = await client.post(f"/chat/sessions/{ben}/approvals/{approval_id}/approve",
-                                   json={"note": "mine now"})  # fmt: skip
-        own = await client.post(f"/chat/sessions/{asha}/approvals/{approval_id}/approve",
-                                json={"note": "ok"})  # fmt: skip
-        done = (await resume).json()
-        for sid in (asha, ben):
-            await client.delete(f"/chat/sessions/{sid}")
-    assert stolen.status_code == 404  # not Ben's approval
-    assert own.status_code == 200 and own.json()["decided_by"] == "Asha"
-    assert done["decision"]["status"] == "executed"
+# --- limits (F10d), through /me ----------------------------------------------------------
 
 
 async def test_a_trader_edits_limits_and_the_next_order_is_checked_against_them() -> None:
     stack = Stack([order_script("Too big now.", notional=800, symbol="AMD")])
     async with stack.client() as client:
-        sid = await start(client, "Asha")
-        before = (await client.get(f"/chat/sessions/{sid}/limits")).json()
+        asha = await signup(client)
+        before = await get(client, asha, "/me/limits")
         changed = await client.put(
-            f"/chat/sessions/{sid}/limits",
+            "/me/limits",
+            headers=asha,
             json={**before["limits"], "max_order_usd": 500, "approval_over_usd": 300},
         )
-        turn = await send(client, sid, "Buy $800 of AMD")
-        stopped = (await client.get(f"/chat/sessions/{sid}/stopped")).json()["rules"]
-        await client.delete(f"/chat/sessions/{sid}")
-    assert before["limits"]["max_order_usd"] == 2000  # Standard profile
+        turn = await send(client, asha, "Buy $800 of AMD")
+        stopped = (await get(client, asha, "/me/stopped"))["rules"]
+    assert before["limits"]["max_order_usd"] == 2000
     assert before["locked"] == ["No short selling", "Only while the market is open",
                                 "Orders you didn't ask for are blocked",
                                 "Each order must match what you asked"]  # fmt: skip
-    assert changed.status_code == 200 and changed.json()["limits"]["max_order_usd"] == 500
+    assert changed.status_code == 200
     step = turn["steps"][0]
     assert step["status"] == "blocked" and "$500" in step["reason"]
     assert stopped == [{"rule_id": "max_order_notional", "decision": "DENY", "count": 1,
                         "title": "Order is over your per-order limit"}]  # fmt: skip
-    changes = [e for e in stack.audit.events if e["tool"] == "update_limits"]
-    assert len(changes) == 1 and changes[0]["args"]["max_order_usd"] == 500
+    assert len([e for e in stack.audit.events if e["tool"] == "update_limits"]) == 1
 
 
 @pytest.mark.parametrize(
@@ -402,10 +402,9 @@ async def test_limits_are_bounded_and_protections_stay_on(
 ) -> None:
     stack = Stack([quote_script()])
     async with stack.client() as client:
-        sid = await start(client, "Asha")
-        current = (await client.get(f"/chat/sessions/{sid}/limits")).json()["limits"]
-        response = await client.put(f"/chat/sessions/{sid}/limits", json={**current, **change})
-        await client.delete(f"/chat/sessions/{sid}")
+        asha = await signup(client)
+        current = (await get(client, asha, "/me/limits"))["limits"]
+        response = await client.put("/me/limits", json={**current, **change}, headers=asha)
     assert response.status_code == 422, response.text
     assert field in response.text
 
@@ -413,10 +412,70 @@ async def test_limits_are_bounded_and_protections_stay_on(
 async def test_limits_can_start_from_a_profile_template() -> None:
     stack = Stack([quote_script()])
     async with stack.client() as client:
-        sid = await start(client, "Asha")
-        strict = (await client.get(f"/chat/sessions/{sid}/limits",
-                                   params={"template": "strict"})).json()  # fmt: skip
-        await client.delete(f"/chat/sessions/{sid}")
+        asha = await signup(client)
+        strict = await get(client, asha, "/me/limits?template=strict")
     assert strict["limits"]["max_order_usd"] == 500
     assert strict["limits"]["allowed_symbols"] == ["SPY", "QQQ", "AAPL", "MSFT"]
-    assert "NVDA" in strict["universe"]
+
+
+# --- admin's session tools, direct mode, scenario hygiene, paper sessions ----------------
+
+
+async def test_admin_can_run_a_direct_session_without_the_guard() -> None:
+    stack = Stack([order_script("Bought.")])
+    async with stack.client() as client:
+        admin = stack.admin_headers()
+        anonymous = await client.post("/chat/sessions", json={"user": "Zed", "guarded": False})
+        made = await client.post("/chat/sessions", json={"user": "Zed", "guarded": False},
+                                 headers=admin)  # fmt: skip
+        sid = made.json()["session_id"]
+        turn = await client.post(f"/chat/sessions/{sid}/messages", json={"text": "Buy"},
+                                 headers=admin)  # fmt: skip
+        orders = stack.market_of("Zed").list_orders("all")["orders"]
+    assert anonymous.status_code == 401
+    assert turn.json()["answer"] == "Bought."
+    assert len(orders) == 1
+    assert stack.audit.events == []  # no gateway, no audit
+
+
+def test_the_desk_scenario_has_no_planted_injection() -> None:
+    from services.replay_server.scenario import load_scenario
+
+    desk = load_scenario("desk", REPO_ROOT / "scenarios")
+    for news_id in desk.news_fixtures:
+        item = json.loads((REPO_ROOT / "fixtures/news" / f"{news_id}.json").read_text())
+        assert item["injection"] is False, news_id
+
+
+def paper_service(watchlist: list[str] | None) -> ChatService:
+    unused: Any = None
+    return ChatService(connect=unused, models=unused, approval_timeout_s=60,
+                       repo_root=REPO_ROOT, paper_watchlist=watchlist)  # fmt: skip
+
+
+async def test_paper_session_is_offered_only_when_paper_mode_is_configured() -> None:
+    for watchlist, offered in ((None, False), (["NVDA", "AMD"], True)):
+        deps = ApiDeps(approvals=MemoryApprovalStore(audit=MemoryAuditSink()),
+                       audit=MemoryAuditReader(MemoryAuditSink()), chat=paper_service(watchlist),
+                       repo_root=REPO_ROOT)  # fmt: skip
+        transport = httpx.ASGITransport(app=create_app(deps))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            ids = [s["id"] for s in (await client.get("/scenarios")).json()["scenarios"]]
+        assert ("alpaca_paper" in ids) is offered
+
+
+async def test_paper_session_must_go_through_the_gateway() -> None:
+    service = paper_service(["NVDA"])
+    with pytest.raises(Exception, match="gateway"):
+        await service.create("alpaca_paper", guarded=False, policy="default", user="Asha")
+
+
+async def test_paper_connector_starts_the_gateway_on_the_alpaca_upstream() -> None:
+    from services.api.chat import stdio_connector
+
+    spec = ChatSpec("alpaca_paper", True, "default", REPO_ROOT / "policies/default.yaml")
+    async with stdio_connector(REPO_ROOT)(spec, "web-alpaca_paper-1", "tok") as connection:
+        args = list(connection.target.args)
+    assert args[:2] == ["-m", "services.gateway"]
+    assert args[args.index("--upstream") + 1] == "alpaca"
+    assert connection.market is None

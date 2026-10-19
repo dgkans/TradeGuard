@@ -18,6 +18,7 @@
 | F10b Trading desk (multi user) | done | 2026-10-18 |
 | F10c Desk polish | done | 2026-10-18 |
 | F10d Limits, market view, admin | done | 2026-10-18 |
+| F10e Trader accounts and live replay | done | 2026-10-18 |
 | F11 Alpaca paper | deferred by user (adapter built and tested against a stand-in) | |
 | F12 Deployment | not started | |
 | F13 Impact and beta | not started | |
@@ -564,4 +565,52 @@ Work:
 - Tests: Python 456 passing, 1 skipped (`make check` clean); Vitest 43 passing; build OK.
 - Evals: none affected (gateway rules unchanged; `update_policy` only swaps the policy).
 - Gaps: no trader identity (local demo only); limits are lost when a session ends.
+- Next: F12 Deployment (hosting decision pending).
+
+## F10e Trader accounts (Postgres) and a live replayed market (user decisions 2026-10-18)
+### Plan
+- **Live replay:** one shared desk clock for every trader and the landing page.
+  - It starts at Thu 1 Oct 2026, 10:30 ET and moves 5 market minutes every tick (default 30 s, about 10x real time).
+  - When the market closes it jumps to the next session's open; it stops at the end of the data (Fri 16 Oct 2026 close).
+  - Every open trader market is advanced to the shared clock on each tick, so fills, prices, P&L and the charts move by themselves. The per-turn "+5 minutes" fill is removed.
+  - The clock position is saved, so a restart continues where it left off.
+  - Labeled as a replayed market, never as today.
+- **Trader accounts in Postgres** (migration 0004):
+  - `traders`: username, password hash, profile, starting cash, limits, order history, chat transcript.
+  - `desk_state`: the clock.
+  - Passwords: scrypt from the standard library (n=2^14, r=8, p=1, 16 byte salt), checked in constant time.
+  - Login tokens are HMAC signed with `TRADER_TOKEN_SECRET` from `.env`, so they survive restarts; they expire after 7 days.
+  - Sign up takes a username, password, starting cash and risk profile; then log in and log out. Repeated wrong passwords lock that username for 5 minutes.
+- **Accounts survive restarts:**
+  - Each trader's market is rebuilt by replaying their saved order history at the recorded clock times. The broker is deterministic (seeded per trader), so cash, positions, orders and order ids come back exactly.
+  - Limits and the chat transcript are restored. (Planned: agent memory in the Postgres LangGraph checkpointer. Not done; see Notes.)
+  - Pending approvals are not resumed after a restart; they expire as usual.
+- **Access:**
+  - Every trader endpoint needs the trader's token and serves only that trader's own session.
+  - The list of traders and everything operator-side stays admin only. The dashboard has no traders sidebar for traders, just "Signed in as …".
+  - Admin gets a Traders page.
+- Tests:
+  - Desk clock stepping and overnight jumps.
+  - Password hashing and tokens.
+  - Sign up, log in, lockout.
+  - Ownership: one trader can't read or act on another's session.
+  - Restore after restart gives the identical book.
+  - Plus a Postgres round trip.
+### Acceptance
+- [x] Traders sign up and log in; a trader can only see and act on their own account (tested: ownership, lockout, wrong password; live: wrong password 401, anonymous /audit 401)
+- [x] An API restart keeps accounts, positions, limits and chat history (tested with Postgres; live: bought $500 of AAPL, restarted the API, logged in, and got the identical book: cash $24,500, 1.511441 AAPL at $330.81)
+- [x] Prices, charts and P&L move on their own along one shared replayed clock (tested; live: the order filled on the next tick with no clock button, and after the restart the clock resumed at its saved time; landing screenshot)
+### Notes and open questions
+- Deviation: desk sessions still use the in-memory LangGraph checkpointer. After a restart, the visible chat, book and limits come back, but the agent doesn't remember earlier turns. Moving to `AsyncPostgresSaver` needs a pooled connection shared by the sessions; it's left as a follow-up.
+- `TRADER_TOKEN_SECRET` was generated into `.env` (never printed). Without it, the API warns and uses a random secret, which logs traders out on restart.
+- Pending approvals are not restored after a restart; they expire.
+### Loop summary
+- Built:
+  - Trader accounts in Postgres (scrypt passwords, HMAC tokens, per-username lockout).
+  - Accounts rebuilt after a restart from their order history.
+  - A shared replayed market clock that moves on its own and is saved across restarts.
+  - Account panel, admin Traders page, clock badge, self-refreshing charts.
+- Tests: Python 471 passing, 1 skipped (`make check` clean); Vitest 44 passing; build OK; replay smoke unchanged.
+- Evals: none affected (gateway unchanged).
+- Gaps: agent memory across restarts (above); no password reset.
 - Next: F12 Deployment (hosting decision pending).

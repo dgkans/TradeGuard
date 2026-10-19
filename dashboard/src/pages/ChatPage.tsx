@@ -89,7 +89,7 @@ export function ChatPage({ session }: { session: SessionInfo }) {
 
   useEffect(() => {
     let live = true;
-    api.session(sessionId).then(
+    api.session().then(
       (state) => {
         if (!live) return;
         setTranscript(state.transcript);
@@ -97,7 +97,7 @@ export function ChatPage({ session }: { session: SessionInfo }) {
         setLoaded(true);
         if (state.pending_approval) {
           setWorking(true);
-          void waitForDecision(sessionId);
+          void waitForDecision();
         }
       },
       (failure: unknown) => {
@@ -117,9 +117,9 @@ export function ChatPage({ session }: { session: SessionInfo }) {
     endRef.current?.scrollIntoView?.({ block: "end" });
   }, [transcript, pending]);
 
-  async function waitForDecision(id: string) {
+  async function waitForDecision() {
     try {
-      const turn = await api.resume(id);
+      const turn = await api.resume();
       setPending(null);
       setTranscript((current) => [...current, ...turnEntries(turn)]);
     } catch (failure) {
@@ -136,12 +136,12 @@ export function ChatPage({ session }: { session: SessionInfo }) {
     setWorking(true);
     setTranscript((current) => [...current, { role: "user", text: message }]);
     try {
-      const turn = await api.send(sessionId, message);
+      const turn = await api.send(message);
       setTranscript((current) => [...current, ...turnEntries(turn)]);
       if (turn.pending_approval) {
         setPending(turn.pending_approval);
         setCardError(null);
-        void waitForDecision(sessionId); // returns once someone approves or rejects
+        void waitForDecision(); // returns once someone approves or rejects
         return;
       }
     } catch (failure) {
@@ -158,8 +158,8 @@ export function ChatPage({ session }: { session: SessionInfo }) {
   async function decide(approve: boolean, note: string) {
     if (!pending) return;
     try {
-      if (approve) await api.approveOwn(sessionId, pending.approval_id, note);
-      else await api.rejectOwn(sessionId, pending.approval_id, note);
+      if (approve) await api.approveOwn(pending.approval_id, note);
+      else await api.rejectOwn(pending.approval_id, note);
       setCardError(null);
     } catch (failure) {
       setCardError(failure);

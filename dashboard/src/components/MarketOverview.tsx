@@ -16,20 +16,24 @@ export function changeTone(value: number): string {
   return "";
 }
 
-function useOverview(): { data: Overview | null; error: unknown } {
+/** The market overview, refreshed as the shared replayed clock moves (F10e). */
+function useOverview(pollMs = 15_000): { data: Overview | null; error: unknown } {
   const api = useApi();
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState<unknown>(null);
   useEffect(() => {
     let live = true;
-    api.marketOverview().then(
+    const load = () => api.marketOverview().then(
       (result) => live && setData(result),
       (failure: unknown) => live && setError(failure),
     );
+    void load();
+    const timer = pollMs > 0 ? window.setInterval(() => void load(), pollMs) : null;
     return () => {
       live = false;
+      if (timer !== null) window.clearInterval(timer);
     };
-  }, [api]);
+  }, [api, pollMs]);
   return { data, error };
 }
 
@@ -90,7 +94,7 @@ export function MarketOverview() {
         <h2>Market today</h2>
         <span className="muted small">
           {marketTime(data.as_of)} · {data.market_open ? "market open" : "market closed"} ·
-          replayed trading day
+          replayed market, updates live
         </span>
       </div>
       <div className="market-grid">

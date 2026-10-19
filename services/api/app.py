@@ -8,11 +8,15 @@ Traders don't log in (user decision, F10d); the admin area needs ADMIN_PASSWORD
 trader sessions run replay scenarios.
 """
 
+import asyncio
+import logging
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -20,15 +24,27 @@ from pydantic import BaseModel, Field
 
 from services.alpaca_adapter.adapter import PaperModeError, require_paper_settings
 from services.api import catalog, market
+from services.api.accounts import (
+    LoginGuard,
+    PostgresTraderStore,
+    Trader,
+    TraderStore,
+    TraderTokens,
+    UsernameTakenError,
+    hash_password,
+    verify_password,
+)
 from services.api.admin import AdminAuth, AdminDisabledError, AdminLockedError, AdminLoginError
 from services.api.chat import (
     ChatError,
     ChatService,
+    ChatSession,
     GatewayStores,
     inprocess_connector,
     settings_models,
 )
 from services.api.describe import RULE_TITLES
+from services.api.desk import DeskClock
 from services.api.limits import Limits
 from services.common.config import Settings
 from services.common.llm import make_chat_model
@@ -48,8 +64,10 @@ from services.gateway.audit import (
 from services.gateway.intent.judge import LlmJudge
 from services.gateway.policy.model import load_policy
 from services.gateway.provenance.store import PostgresProvenanceStore
+from services.replay_server.scenario import load_scenario
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+logger = logging.getLogger(__name__)
 DECISIONS = ("ALLOW", "DENY", "ESCALATE")
 
 
@@ -61,6 +79,14 @@ class ApiDeps:
     repo_root: Path = REPO_ROOT
     jaeger_ui_url: str = "http://localhost:16686"
     admin: AdminAuth = field(default_factory=lambda: AdminAuth(None))  # off unless configured
+    accounts: "Accounts | None" = None  # trader sign up and log in (F10e)
+
+
+@dataclass
+class Accounts:
+    store: TraderStore
+    tokens: TraderTokens
+    guard: LoginGuard = field(default_factory=LoginGuard)
 
 
 class ChatCreate(BaseModel):
@@ -73,6 +99,19 @@ class ChatCreate(BaseModel):
 
 class ChatMessage(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
+
+
+class Signup(BaseModel):
+    username: str = Field(pattern=r"^[A-Za-z0-9_]{3,24}$")
+    password: str = Field(min_length=8, max_length=200)
+    display_name: str | None = Field(default=None, max_length=40)
+    starting_cash: float = Field(default=10000, ge=1000, le=1_000_000)
+    profile: str = Field(default="default", pattern="^(default|strict)$")
+
+
+class Login(BaseModel):
+    username: str = Field(max_length=24)
+    password: str = Field(max_length=200)
 
 
 class AdminLogin(BaseModel):
@@ -120,12 +159,22 @@ def create_app(deps: ApiDeps) -> FastAPI:
 
     @app.get("/market/overview")
     async def market_overview() -> dict[str, Any]:
-        return market.overview(deps.repo_root)
+        clock = deps.chat.clock if deps.chat is not None else None
+        return market.overview(deps.repo_root, clock.now if clock else None)
+
+    @app.get("/desk/clock")
+    async def desk_clock() -> dict[str, Any]:
+        """The shared replayed market time (F10e). Never presented as today's date."""
+        clock = deps.chat.clock if deps.chat is not None else None
+        if clock is None:
+            return {"now": None, "ended": False, "live": False}
+        return {"now": clock.now.isoformat(), "ended": clock.ended, "live": True}
 
     add_approval_routes(app, deps.approvals, dependencies=admin_only)
     add_audit_routes(app, deps, admin_only)
     add_catalog_routes(app, deps.repo_root, deps.chat, admin_only)
-    add_chat_routes(app, deps)
+    add_chat_routes(app, deps, admin_only)
+    add_account_routes(app, deps, admin_only)
     return app
 
 
@@ -220,39 +269,41 @@ def add_catalog_routes(
         return {"scenarios": offered}
 
 
-def add_chat_routes(app: FastAPI, deps: ApiDeps) -> None:
+def add_chat_routes(app: FastAPI, deps: ApiDeps, admin_only: list[Any]) -> None:
+    """Sessions by id: the admin's view (F10e). Traders use their own /me routes."""
+
     def service() -> ChatService:
         if deps.chat is None:
             raise HTTPException(status_code=503, detail="chat is not enabled on this server")
         return deps.chat
 
-    @app.get("/chat/sessions")
+    @app.get("/chat/sessions", dependencies=admin_only)
     async def sessions() -> dict[str, Any]:
         out = []
         for session in service().sessions.values():
             out.append(session.info())
         return {"sessions": out}
 
-    @app.post("/chat/sessions", status_code=201)
+    @app.post("/chat/sessions", status_code=201, dependencies=admin_only)
     async def create_session(body: ChatCreate) -> dict[str, Any]:
         session = await service().create(
             body.scenario, body.guarded, body.policy, body.user, body.starting_cash
         )
         return session.info()
 
-    @app.get("/chat/sessions/{session_id}")
+    @app.get("/chat/sessions/{session_id}", dependencies=admin_only)
     async def get_session(session_id: str) -> dict[str, Any]:
         return service().get(session_id).snapshot()
 
-    @app.post("/chat/sessions/{session_id}/messages")
+    @app.post("/chat/sessions/{session_id}/messages", dependencies=admin_only)
     async def send(session_id: str, body: ChatMessage) -> dict[str, Any]:
         return await service().get(session_id).send(body.text)
 
-    @app.post("/chat/sessions/{session_id}/resume")
+    @app.post("/chat/sessions/{session_id}/resume", dependencies=admin_only)
     async def resume(session_id: str) -> dict[str, Any]:
         return await service().get(session_id).resume()
 
-    @app.get("/chat/sessions/{session_id}/portfolio")
+    @app.get("/chat/sessions/{session_id}/portfolio", dependencies=admin_only)
     async def portfolio(session_id: str) -> dict[str, Any]:
         return service().get(session_id).portfolio()
 
@@ -270,15 +321,17 @@ def add_chat_routes(app: FastAPI, deps: ApiDeps) -> None:
         except ApprovalConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/chat/sessions/{session_id}/approvals/{approval_id}/approve")
+    @app.post(
+        "/chat/sessions/{session_id}/approvals/{approval_id}/approve", dependencies=admin_only
+    )
     async def approve_own(session_id: str, approval_id: str, body: TraderDecision) -> Any:
         return await decide_own(session_id, approval_id, True, body)
 
-    @app.post("/chat/sessions/{session_id}/approvals/{approval_id}/reject")
+    @app.post("/chat/sessions/{session_id}/approvals/{approval_id}/reject", dependencies=admin_only)
     async def reject_own(session_id: str, approval_id: str, body: TraderDecision) -> Any:
         return await decide_own(session_id, approval_id, False, body)
 
-    @app.get("/chat/sessions/{session_id}/limits")
+    @app.get("/chat/sessions/{session_id}/limits", dependencies=admin_only)
     async def get_limits(
         session_id: str, template: str | None = Query(default=None, max_length=100)
     ) -> dict[str, Any]:
@@ -291,19 +344,151 @@ def add_chat_routes(app: FastAPI, deps: ApiDeps) -> None:
             raise HTTPException(status_code=404, detail=f"no profile {template}")
         return session.limits(load_policy(path))
 
-    @app.put("/chat/sessions/{session_id}/limits")
+    @app.put("/chat/sessions/{session_id}/limits", dependencies=admin_only)
     async def put_limits(session_id: str, body: Limits) -> dict[str, Any]:
         return await service().get(session_id).set_limits(body)
 
-    @app.get("/chat/sessions/{session_id}/stopped")
+    @app.get("/chat/sessions/{session_id}/stopped", dependencies=admin_only)
     async def stopped(session_id: str) -> dict[str, Any]:
         """What the guard blocked or held for this trader (their session only)."""
         service().get(session_id)
         return {"rules": titled(await deps.audit.rule_counts(session_prefix=session_id))}
 
-    @app.delete("/chat/sessions/{session_id}", status_code=204)
+    @app.delete("/chat/sessions/{session_id}", status_code=204, dependencies=admin_only)
     async def close(session_id: str) -> None:
         await service().close(session_id)
+
+
+def add_account_routes(app: FastAPI, deps: ApiDeps, admin_only: list[Any]) -> None:
+    """Trader accounts (F10e): sign up, log in, and the trader's own session (/me)."""
+
+    def accounts() -> Accounts:
+        if deps.accounts is None:
+            raise HTTPException(status_code=503, detail="accounts are not enabled on this server")
+        return deps.accounts
+
+    def chat() -> ChatService:
+        if deps.chat is None:
+            raise HTTPException(status_code=503, detail="chat is not enabled on this server")
+        return deps.chat
+
+    async def me(x_trader_token: str | None = Header(default=None)) -> ChatSession:
+        """The logged-in trader's own session. Any other session is out of reach."""
+        trader_id = accounts().tokens.verify(x_trader_token)
+        trader = await accounts().store.by_id(trader_id) if trader_id is not None else None
+        if trader is None:
+            raise HTTPException(status_code=401, detail="log in first")
+        return await chat().open_trader(trader)
+
+    Mine = Annotated[ChatSession, Depends(me)]  # noqa: N806 - a type alias, named like one
+
+    def issued(trader: Trader) -> dict[str, Any]:
+        return {"token": accounts().tokens.issue(trader.id), "trader": trader.public()}
+
+    @app.post("/auth/signup", status_code=201)
+    async def signup(body: Signup) -> dict[str, Any]:
+        display = " ".join((body.display_name or body.username).split()) or body.username
+        try:
+            trader = await accounts().store.create(
+                body.username,
+                hash_password(body.password),
+                display,
+                body.profile,
+                body.starting_cash,
+            )
+        except UsernameTakenError as exc:
+            raise HTTPException(status_code=409, detail="that username is taken") from exc
+        return issued(trader)
+
+    @app.post("/auth/login")
+    async def login(body: Login) -> dict[str, Any]:
+        guard = accounts().guard
+        if guard.locked(body.username):
+            raise HTTPException(status_code=429, detail="too many attempts; try again later")
+        trader = await accounts().store.by_username(body.username)
+        if trader is None or not verify_password(body.password, trader.password_hash):
+            guard.failed(body.username)
+            raise HTTPException(status_code=401, detail="wrong username or password")
+        guard.succeeded(body.username)
+        return issued(trader)
+
+    @app.post("/auth/logout", status_code=204)
+    async def logout(session: Mine) -> None:
+        await chat().persist(session)
+        await chat().close(session.session_id)
+
+    @app.get("/me")
+    async def whoami(session: Mine) -> dict[str, Any]:
+        trader = await accounts().store.by_id(session.spec.trader_id or 0)
+        return {"trader": trader.public() if trader else None, "session": session.info()}
+
+    @app.get("/me/session")
+    async def my_session(session: Mine) -> dict[str, Any]:
+        return session.snapshot()
+
+    @app.post("/me/messages")
+    async def my_message(body: ChatMessage, session: Mine) -> dict[str, Any]:
+        return await session.send(body.text)
+
+    @app.post("/me/resume")
+    async def my_resume(session: Mine) -> dict[str, Any]:
+        return await session.resume()
+
+    @app.get("/me/portfolio")
+    async def my_portfolio(session: Mine) -> dict[str, Any]:
+        return session.portfolio()
+
+    @app.get("/me/limits")
+    async def my_limits(session: Mine,
+                        template: str | None = Query(default=None, max_length=100),
+                        ) -> dict[str, Any]:  # fmt: skip
+        if template is None:
+            return session.limits()
+        path = catalog.policy_path(deps.repo_root, template)
+        if path is None:
+            raise HTTPException(status_code=404, detail=f"no profile {template}")
+        return session.limits(load_policy(path))
+
+    @app.put("/me/limits")
+    async def set_my_limits(body: Limits, session: Mine) -> dict[str, Any]:
+        return await session.set_limits(body)
+
+    @app.get("/me/stopped")
+    async def my_stopped(session: Mine) -> dict[str, Any]:
+        rules = await deps.audit.rule_counts(session_prefix=session.session_id)
+        return {"rules": titled(rules)}
+
+    async def decide(session: ChatSession, approval_id: str, approve: bool, note: str) -> Any:
+        approval = await deps.approvals.get(approval_id)
+        if approval is None or approval.session_id != session.session_id:
+            raise HTTPException(status_code=404, detail="no such approval in your session")
+        try:
+            return await deps.approvals.decide(approval_id, approve=approve,
+                                               decided_by=session.spec.user, note=note)  # fmt: skip
+        except ApprovalConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/me/approvals/{approval_id}/approve")
+    async def approve_mine(approval_id: str, body: TraderDecision,
+                           session: Mine) -> Any:  # fmt: skip
+        return await decide(session, approval_id, True, body.note)
+
+    @app.post("/me/approvals/{approval_id}/reject")
+    async def reject_mine(approval_id: str, body: TraderDecision,
+                          session: Mine) -> Any:  # fmt: skip
+        return await decide(session, approval_id, False, body.note)
+
+    @app.get("/admin/traders", dependencies=admin_only)
+    async def traders() -> dict[str, Any]:
+        active = {s.spec.trader_id: s for s in chat().sessions.values()} if deps.chat else {}
+        out = []
+        for trader in await accounts().store.list_all():
+            session = active.get(trader.id)
+            placed = sum(1 for event in trader.events if event.get("kind") == "place")
+            out.append({**trader.public(), "active": session is not None,
+                        "waiting_for_approval": bool(session and session.pending),
+                        "orders": placed})  # fmt: skip
+        return {"traders": out}
 
 
 class _Late:
@@ -330,6 +515,11 @@ def paper_watchlist(settings: Settings) -> list[str] | None:
     return symbols
 
 
+def desk_start() -> datetime:
+    """Where the shared clock starts the first time: the desk scenario's start time."""
+    return load_scenario("desk", REPO_ROOT / "scenarios").start_time
+
+
 def create_postgres_app(settings: Settings) -> FastAPI:
     """The API against DATABASE_URL. Trader sessions run their market and gateway in this
     process and share one set of Postgres stores (F10b); paper sessions use a subprocess."""
@@ -348,13 +538,28 @@ def create_postgres_app(settings: Settings) -> FastAPI:
         paper_watchlist=paper_watchlist(settings),
     )
     password = settings.admin_password.get_secret_value() if settings.admin_password else None
+    secret = settings.trader_token_secret.get_secret_value() if settings.trader_token_secret else ""
+    if not secret:
+        logger.warning("TRADER_TOKEN_SECRET is not set: traders must log in again after a restart")
+        secret = secrets.token_urlsafe(32)
     deps = ApiDeps(
         approvals=_Late(holder, "approvals"),
         audit=_Late(holder, "audit"),
         chat=chat,
         jaeger_ui_url=settings.jaeger_ui_url,
         admin=AdminAuth(password),
+        accounts=Accounts(store=_Late(holder, "traders"), tokens=TraderTokens(secret)),
     )
+
+    async def tick_forever(clock: DeskClock, store: TraderStore) -> None:
+        """Move the shared replayed market on, every DESK_TICK_SECONDS (F10e)."""
+        while True:
+            await asyncio.sleep(settings.desk_tick_seconds)
+            now = clock.tick()
+            if now is None:
+                return  # the data ended: the market stays at its last close
+            chat.sync(now)
+            await store.set_clock(now.isoformat())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -366,12 +571,22 @@ def create_postgres_app(settings: Settings) -> FastAPI:
             provenance = await stack.enter_async_context(PostgresProvenanceStore(url))
             judge_model = make_chat_model(settings, json_mode=True, model=settings.judge_model)
             judge = LlmJudge(judge_model, model=f"{settings.llm_provider}:{settings.judge_model}")
+            traders = await stack.enter_async_context(PostgresTraderStore(url))
             holder["approvals"] = approvals
             holder["audit"] = reader
+            holder["traders"] = traders
             holder["stores"] = GatewayStores(sink, approvals, provenance, judge)
+            saved = await traders.get_clock()
+            start = datetime.fromisoformat(saved) if saved else desk_start()
+            chat.clock = DeskClock(REPO_ROOT / "fixtures/bars", start)
+            chat.store = traders
+            ticker = asyncio.create_task(tick_forever(chat.clock, traders), name="desk-clock")
             try:
                 yield
             finally:
+                ticker.cancel()
+                for session in list(chat.sessions.values()):
+                    await chat.persist(session)
                 await chat.close_all()
 
     app = create_app(deps)

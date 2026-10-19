@@ -5,6 +5,7 @@ day change against the prior close, and 5 minute closes for sparklines. Nothing 
 up, and nothing after the market's "now" is shown.
 """
 
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -38,12 +39,17 @@ def summary(market: ReplaySession, symbol: str) -> dict[str, Any] | None:
     }
 
 
-@lru_cache(maxsize=2)
-def overview(root: Path, scenario_id: str = "desk") -> dict[str, Any]:
-    """Indices, the scenario's watchlist plus a few more allowed stocks, and top movers."""
+@lru_cache(maxsize=4)
+def overview(root: Path, at: datetime | None = None, scenario_id: str = "desk") -> dict[str, Any]:
+    """Indices, the scenario's watchlist plus a few more stocks, and top movers, at `at`
+    (the shared desk clock, F10e) or at the scenario's start time."""
+    from services.api.book import catch_up
+
     scenario = load_scenario(scenario_id, root / "scenarios")
     market = ReplaySession(scenario, bars_root=root / "fixtures/bars",
                            news_root=root / "fixtures/news")  # fmt: skip
+    if at is not None:
+        catch_up(market, at)
     extra = ["AMZN", "META", "GOOGL"]
     symbols = []
     for symbol in [*scenario.watchlist, *extra]:

@@ -45,8 +45,8 @@ describe("AuditTable", () => {
   it("lets the user filter by a row's session", async () => {
     const onSession = vi.fn();
     render(<AuditTable events={[auditEvent()]} onSession={onSession} />);
-    await userEvent.click(screen.getByRole("button", { name: "web-demo-1" }));
-    expect(onSession).toHaveBeenCalledWith("web-demo-1");
+    await userEvent.click(screen.getByRole("button", { name: "web-1-asha" }));
+    expect(onSession).toHaveBeenCalledWith("web-1-asha");
   });
 
   it("shows a dash when the call has not finished (no latency yet)", () => {

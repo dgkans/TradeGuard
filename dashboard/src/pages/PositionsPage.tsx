@@ -50,7 +50,7 @@ export function PositionsPage({ session, pollMs = 3000 }: { session: SessionInfo
   useEffect(() => {
     let live = true;
     const load = () =>
-      api.portfolio(sessionId).then(
+      api.portfolio().then(
         (data) => {
           if (!live) return;
           setBook(data);
