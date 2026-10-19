@@ -148,6 +148,8 @@ export interface SessionInfo {
   starting_cash?: number;
   busy: boolean;
   waiting_for_approval: boolean;
+  /** AI requests left today on the free plan (F12); null when there's no cap. */
+  ai_turns_left?: number | null;
 }
 
 export type StepStatus = "ok" | "blocked" | "held" | "failed";

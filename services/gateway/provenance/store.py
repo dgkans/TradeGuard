@@ -11,12 +11,12 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
-from typing import Any, Literal, Protocol
+from typing import Literal, Protocol
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from services.common.pg import ResilientConnection
 from services.gateway.provenance.detector import detect
 
 Kind = Literal["user_message", "tool_result"]
@@ -61,11 +61,11 @@ class PostgresProvenanceStore:
 
     def __init__(self, url: str) -> None:
         self.url = url
-        self._conn: psycopg.AsyncConnection[dict[str, Any]] | None = None
+        self._conn: ResilientConnection | None = None
         self._lock = asyncio.Lock()
 
     async def __aenter__(self) -> "PostgresProvenanceStore":
-        self._conn = await psycopg.AsyncConnection.connect(
+        self._conn = await ResilientConnection.connect(
             self.url, autocommit=True, row_factory=dict_row
         )
         return self
@@ -80,7 +80,7 @@ class PostgresProvenanceStore:
             await self._conn.close()
             self._conn = None
 
-    def _connection(self) -> psycopg.AsyncConnection[dict[str, Any]]:
+    def _connection(self) -> ResilientConnection:
         if self._conn is None:
             raise RuntimeError("provenance store is not connected")
         return self._conn

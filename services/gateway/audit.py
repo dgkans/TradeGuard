@@ -17,6 +17,8 @@ from alembic import command
 from alembic.config import Config
 from psycopg.types.json import Jsonb
 
+from services.common.pg import ResilientConnection
+
 Decision = Literal["ALLOW", "DENY", "ESCALATE"]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -96,12 +98,12 @@ class PostgresAuditSink:
 
     def __init__(self, url: str) -> None:
         self.url = url
-        self._conn: psycopg.AsyncConnection[Any] | None = None
+        self._conn: ResilientConnection | None = None
         # One connection cannot run two queries at once.
         self._lock = asyncio.Lock()
 
     async def __aenter__(self) -> "PostgresAuditSink":
-        self._conn = await psycopg.AsyncConnection.connect(self.url, autocommit=True)
+        self._conn = await ResilientConnection.connect(self.url, autocommit=True)
         return self
 
     async def __aexit__(
@@ -114,7 +116,7 @@ class PostgresAuditSink:
             await self._conn.close()
             self._conn = None
 
-    def _connection(self) -> psycopg.AsyncConnection[Any]:
+    def _connection(self) -> ResilientConnection:
         if self._conn is None:
             raise RuntimeError("audit sink is not connected")
         return self._conn
@@ -245,11 +247,11 @@ class PostgresAuditReader:
 
     def __init__(self, url: str) -> None:
         self.url = url
-        self._conn: psycopg.AsyncConnection[Any] | None = None
+        self._conn: ResilientConnection | None = None
         self._lock = asyncio.Lock()
 
     async def __aenter__(self) -> "PostgresAuditReader":
-        self._conn = await psycopg.AsyncConnection.connect(self.url, autocommit=True)
+        self._conn = await ResilientConnection.connect(self.url, autocommit=True)
         return self
 
     async def __aexit__(
@@ -262,7 +264,7 @@ class PostgresAuditReader:
             await self._conn.close()
             self._conn = None
 
-    def _connection(self) -> psycopg.AsyncConnection[Any]:
+    def _connection(self) -> ResilientConnection:
         if self._conn is None:
             raise RuntimeError("audit reader is not connected")
         return self._conn

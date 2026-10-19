@@ -127,7 +127,7 @@ function Landing({ onHow }: { onHow: () => void }) {
           <p className="lede">
             Create an account on the left, then tell the agent what to trade at live market
             prices. Every order is checked against your limits and your request before it
-            reaches the broker. Trades are paper only: no real money.
+            reaches the broker.
           </p>
           <div className="hero-steps">
             <span><strong>1</strong> Sign up or log in</span>

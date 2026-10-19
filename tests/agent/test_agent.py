@@ -206,3 +206,30 @@ async def test_style_note_is_added_to_the_system_prompt_only_when_set(
             await run_turn(graph, "hi", thread_id=str(uuid.uuid4()))
     assert "Never show order ids." not in acting_system(plain_model)
     assert acting_system(styled_model).rstrip().endswith("Never show order ids.")
+
+
+async def test_a_history_window_sends_only_the_last_turns_to_the_model(
+    replay_session: ReplaySession,
+) -> None:
+    """Trader sessions on a free AI plan (F12) keep prompts small; a tool call is never split
+    from its result. Without a window (evals, CLI) the whole conversation is sent."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    model = ScriptedChatModel([
+        understand("question", "a"), plan(), answer("First."),
+        understand("question", "b"), plan(), tool_call("get_quote", {"symbol": "NVDA"}),
+        answer("NVDA is $212.74."),
+        understand("question", "c"), plan(), answer("Third."),
+    ])  # fmt: skip
+    context = AgentContext("desk", ["NVDA"], history_turns=2)
+    async with McpToolset(build_server(replay_session), log=ToolCallLog()) as toolset:
+        graph = build_graph(model, model, toolset.tools, context=context,
+                            checkpointer=InMemorySaver())  # fmt: skip
+        for text in ("one", "two", "three"):
+            await run_turn(graph, text, thread_id="t")
+    last_act = model.prompts[-1]
+    kinds = [type(m).__name__ for m in last_act]
+    contents = [str(m.content) for m in last_act]
+    assert "one" not in contents and "First." not in contents
+    assert contents[1] == "two" and contents[-1] == "three"
+    assert kinds.count("ToolMessage") == 1 and "AIMessage" in kinds  # call and result together

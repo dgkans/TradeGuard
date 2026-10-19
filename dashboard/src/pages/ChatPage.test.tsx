@@ -19,10 +19,10 @@ function turn(overrides: Partial<TurnResult>): TurnResult {
   return { answer: null, pending_approval: null, steps: [], decision: null, ...overrides };
 }
 
-function renderWith(api: Api) {
+function renderWith(api: Api, session: SessionInfo = info) {
   return render(
     <ApiContext.Provider value={api}>
-      <ChatPage session={info} />
+      <ChatPage session={session} />
     </ApiContext.Provider>,
   );
 }
@@ -111,5 +111,17 @@ describe("ChatPage", () => {
     renderWith(fakeApi({ session: vi.fn(async () => state()) }));
     await screen.findByLabelText(/message/i);
     expect(screen.queryByRole("button", { name: /min|hour/i })).not.toBeInTheDocument();
+  });
+
+  it("shows how many AI requests are left today on the free plan", async () => {
+    const { rerender } = renderWith(fakeApi({ session: vi.fn(async () => state()) }),
+                                    { ...info, ai_turns_left: 3 });
+    expect(await screen.findByText(/3 AI requests left today/)).toBeInTheDocument();
+    rerender(
+      <ApiContext.Provider value={fakeApi({ session: vi.fn(async () => state()) })}>
+        <ChatPage session={{ ...info, ai_turns_left: null }} />
+      </ApiContext.Provider>,
+    );
+    expect(screen.queryByText(/left today/)).not.toBeInTheDocument();
   });
 });

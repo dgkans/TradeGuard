@@ -37,6 +37,7 @@ class Stack:
         max_sessions: int = 8,
         feed: LiveFeed | None = None,
         store: MemoryTraderStore | None = None,
+        **service: Any,
     ) -> None:
         self.audit = MemoryAuditSink()
         self.approvals = MemoryApprovalStore(audit=self.audit)
@@ -52,6 +53,7 @@ class Stack:
             poll_seconds=0.05,
             feed=feed,
             store=self.store,
+            **service,
         )
         self.admin = AdminAuth("test-admin")
         deps = ApiDeps(approvals=self.approvals, audit=MemoryAuditReader(self.audit),
@@ -530,3 +532,81 @@ async def test_paper_connector_starts_the_gateway_on_the_alpaca_upstream() -> No
     assert args[:2] == ["-m", "services.gateway"]
     assert args[args.index("--upstream") + 1] == "alpaca"
     assert connection.market is None
+
+
+# --- the free AI budget (F12) -------------------------------------------------------------
+
+
+async def test_a_trader_gets_a_friendly_message_after_their_daily_ai_turns() -> None:
+    stack = Stack([quote_script()], trader_daily_turn_cap=1)
+    async with stack.client() as client:
+        asha = await signup(client)
+        assert (await get(client, asha, "/me"))["session"]["ai_turns_left"] == 1
+        await send(client, asha, "What is NVDA at?")
+        refused = await client.post("/me/messages", json={"text": "And AMD?"}, headers=asha)
+        left = (await get(client, asha, "/me"))["session"]["ai_turns_left"]
+    assert refused.status_code == 429
+    assert "used your 1 AI requests for today" in refused.json()["detail"]
+    assert left == 0
+
+
+async def test_the_site_wide_daily_cap_stops_every_trader() -> None:
+    stack = Stack([quote_script(), quote_script()], daily_turn_cap=1)
+    async with stack.client() as client:
+        asha = await signup(client, "asha")
+        ben = await signup(client, "ben")
+        await send(client, asha, "What is NVDA at?")
+        refused = await client.post("/me/messages", json={"text": "hi"}, headers=ben)
+    assert refused.status_code == 429
+    assert "today's free budget" in refused.json()["detail"]
+
+
+class RateLimitError(Exception):
+    """Stands in for groq.RateLimitError."""
+
+    status_code = 429
+
+
+class LimitedModel(ScriptedChatModel):
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        raise RateLimitError("rate limit reached for model openai/gpt-oss-120b")
+
+
+async def test_a_provider_rate_limit_is_a_friendly_429() -> None:
+    stack = Stack([LimitedModel(responses=[])])
+    async with stack.client() as client:
+        asha = await signup(client)
+        refused = await client.post("/me/messages", json={"text": "What is NVDA at?"},
+                                    headers=asha)  # fmt: skip
+        again = await get(client, asha, "/me/session")
+    assert refused.status_code == 429
+    assert refused.json()["detail"].startswith("The AI is at its free usage limit")
+    assert again["busy"] is False  # the session is still usable
+
+
+class AuthenticationError(Exception):
+    """Stands in for groq.AuthenticationError (a bad or revoked key)."""
+
+    status_code = 401
+
+
+class BrokenKeyModel(ScriptedChatModel):
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        raise AuthenticationError("Error code: 401 - Invalid API Key")
+
+
+async def test_a_provider_failure_is_a_friendly_503_and_hides_the_cause() -> None:
+    stack = Stack([BrokenKeyModel(responses=[])], trader_daily_turn_cap=5)
+    async with stack.client() as client:
+        asha = await signup(client)
+        failed = await client.post("/me/messages", json={"text": "What is NVDA at?"},
+                                   headers=asha)  # fmt: skip
+        still = await client.get("/me/session", headers=asha)
+    assert still.json()["ai_turns_left"] == 5  # a failed turn isn't charged
+    assert failed.status_code == 503
+    assert (
+        failed.json()["detail"]
+        == "The AI service isn't available right now. Please try again later."
+    )
+    assert "API Key" not in failed.text
+    assert still.status_code == 200

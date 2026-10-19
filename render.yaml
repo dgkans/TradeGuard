@@ -1,0 +1,54 @@
+# Render Blueprint for the TradeGuard API (F12). Free plan, one Docker web service.
+# Secrets (sync: false) are typed into Render's dashboard once, never committed here.
+# Deploys only after GitHub CI passes on main.
+services:
+  - type: web
+    name: tradeguard-api
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeployTrigger: checksPass
+    buildFilter:
+      ignoredPaths:
+        - dashboard/**
+        - "**/*.md"
+        - tests/**
+    envVars:
+      # Neon's connection string, e.g. postgresql://...neon.tech/neondb?sslmode=require
+      - key: DATABASE_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: TRADER_TOKEN_SECRET
+        generateValue: true
+      # The Cloudflare Pages address of the dashboard, e.g. https://tradeguard.pages.dev
+      - key: CORS_ORIGINS
+        sync: false
+      - key: LLM_PROVIDER
+        value: groq
+      - key: LLM_MODEL
+        value: openai/gpt-oss-120b
+      - key: LLM_FAST_MODEL
+        value: openai/gpt-oss-20b
+      - key: JUDGE_MODEL
+        value: openai/gpt-oss-20b
+      # Groq's free plan: about 200K tokens a day on the main model.
+      - key: LLM_DAILY_TURN_CAP
+        value: "30"
+      - key: TRADER_DAILY_TURN_CAP
+        value: "10"
+      - key: TRADER_HISTORY_TURNS
+        value: "3"
+      - key: TRUST_PROXY
+        value: "true"
+      - key: JAEGER_UI_URL
+        value: ""
+      - key: LIVE_PRICES
+        value: "true"
+      - key: APPROVAL_TIMEOUT_SECONDS
+        value: "300"

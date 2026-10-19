@@ -37,11 +37,14 @@ tracer = trace.get_tracer("tradeguard.agent")
 @dataclass(frozen=True)
 class AgentContext:
     """Facts about the session that go into the system prompt. `style`, if set, is appended
-    as extra instructions (the dashboard's plain-language note for traders, F10b)."""
+    as extra instructions (the dashboard's plain-language note for traders, F10b).
+    `history_turns`, if set, sends only the last that many user turns to the acting model
+    (trader sessions on a free AI plan, F12); evals and the CLI send everything."""
 
     scenario_id: str
     watchlist: list[str]
     style: str = ""
+    history_turns: int | None = None
 
 
 class AgentState(MessagesState):
@@ -50,6 +53,17 @@ class AgentState(MessagesState):
     plan: str
     prompt_version: str
     tool_calls_this_turn: int
+
+
+def recent_turns(messages: Sequence[BaseMessage], turns: int | None) -> list[BaseMessage]:
+    """Messages from the `turns`-th last user message on. Cutting only at user messages
+    keeps every tool call with its result."""
+    if not turns:
+        return list(messages)
+    starts = [i for i, message in enumerate(messages) if isinstance(message, HumanMessage)]
+    if len(starts) <= turns:
+        return list(messages)
+    return list(messages[starts[-turns] :])
 
 
 def build_graph(
@@ -102,7 +116,8 @@ def build_graph(
         )
         if context.style:
             system = f"{system.rstrip()}\n\n{context.style.strip()}"
-        reply = await acting_model.ainvoke([SystemMessage(system), *state["messages"]])
+        history = recent_turns(state["messages"], context.history_turns)
+        reply = await acting_model.ainvoke([SystemMessage(system), *history])
         calls = len(reply.tool_calls) if isinstance(reply, AIMessage) else 0
         return {
             "messages": [reply],

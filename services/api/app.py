@@ -12,6 +12,7 @@ API binds to 127.0.0.1 for local use.
 import asyncio
 import logging
 import secrets
+import time
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ from typing import Annotated, Any, cast
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -82,6 +84,26 @@ class ApiDeps:
     admin: AdminAuth = field(default_factory=lambda: AdminAuth(None))  # off unless configured
     accounts: "Accounts | None" = None  # trader sign up and log in (F10e)
     feed: LiveFeed | None = None  # live prices (F10f); None: replay data
+    cors_origins: list[str] = field(default_factory=list)  # the hosted dashboard (F12)
+    trust_proxy: bool = False  # take the client address from X-Forwarded-For (F12)
+
+
+class IpLimiter:
+    """At most `per_hour` events per client address in any hour (sign ups, F12)."""
+
+    def __init__(self, per_hour: int) -> None:
+        self.per_hour = per_hour
+        self._seen: dict[str, list[float]] = {}
+
+    def allow(self, address: str) -> bool:
+        now = time.monotonic()
+        recent = [t for t in self._seen.get(address, []) if now - t < 3600]
+        if len(recent) >= self.per_hour:
+            self._seen[address] = recent
+            return False
+        recent.append(now)
+        self._seen[address] = recent
+        return True
 
 
 @dataclass
@@ -89,6 +111,7 @@ class Accounts:
     store: TraderStore
     tokens: TraderTokens
     guard: LoginGuard = field(default_factory=LoginGuard)
+    signups: IpLimiter = field(default_factory=lambda: IpLimiter(5))
 
 
 class ChatCreate(BaseModel):
@@ -123,14 +146,48 @@ class TraderDecision(BaseModel):
 def create_app(deps: ApiDeps) -> FastAPI:
     """The dashboard API over the given stores. Errors are JSON `{"detail": ...}`."""
     app = FastAPI(title="TradeGuard API", version="0.2.0")
+    if deps.cors_origins:
+        # Auth travels in headers, never cookies, so no credentials mode is needed.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=deps.cors_origins,
+            allow_methods=["GET", "POST", "PUT", "DELETE"],
+            allow_headers=["authorization", "content-type", "x-trader-token"],
+            max_age=3600,
+        )
 
     @app.exception_handler(ChatError)
     async def chat_error(request: Request, exc: ChatError) -> JSONResponse:
         return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
 
+    @app.exception_handler(Exception)
+    async def unexpected(request: Request, exc: Exception) -> JSONResponse:
+        """Never a bare 500 page: log the details, answer in plain words (F12)."""
+        logger.exception("unhandled error on %s %s", request.method, request.url.path)
+        detail = "Something went wrong on our side. Please try again."
+        return JSONResponse(status_code=500, content={"detail": detail})
+
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
+        """The process is up. Cheap: the uptime monitor calls it every few minutes."""
         return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def readyz() -> JSONResponse:
+        """The database answers and live prices are fresh (F12)."""
+        checks: dict[str, str] = {"database": "off", "prices": "off"}
+        healthy = True
+        if deps.accounts is not None:
+            try:
+                await deps.accounts.store.ping()
+                checks["database"] = "ok"
+            except Exception:  # reported, not raised: this is the health check
+                checks["database"] = "down"
+                healthy = False
+        if deps.feed is not None:
+            checks["prices"] = "stale" if deps.feed.status()["stale"] else "ok"
+        return JSONResponse(status_code=200 if healthy else 503,
+                            content={"ready": healthy, **checks})  # fmt: skip
 
     async def require_admin(authorization: str | None = Header(default=None)) -> None:
         token = (authorization or "").removeprefix("Bearer ").strip()
@@ -180,7 +237,8 @@ def add_audit_routes(app: FastAPI, deps: ApiDeps, admin_only: list[Any]) -> None
         base = deps.jaeger_ui_url.rstrip("/")
         for event in events:
             trace_id = event.get("trace_id")
-            event["trace_url"] = f"{base}/trace/{trace_id}" if trace_id else None
+            # No trace viewer in production (F12): no link rather than a dead one.
+            event["trace_url"] = f"{base}/trace/{trace_id}" if trace_id and base else None
         next_before = events[-1]["id"] if len(events) == limit else None
         if next_before is not None:
             older = await deps.audit.list_events(AuditQuery(session_id, decision, tool, 1,
@@ -372,8 +430,17 @@ def add_account_routes(app: FastAPI, deps: ApiDeps, admin_only: list[Any]) -> No
         return {"token": accounts().tokens.issue(trader.id), "role": "trader",
                 "trader": trader.public()}  # fmt: skip
 
+    def client_address(request: Request) -> str:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if deps.trust_proxy and forwarded:
+            return forwarded.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
+
     @app.post("/auth/signup", status_code=201)
-    async def signup(body: Signup) -> dict[str, Any]:
+    async def signup(body: Signup, request: Request) -> dict[str, Any]:
+        if not accounts().signups.allow(client_address(request)):
+            detail = "too many new accounts from here; try again later"
+            raise HTTPException(status_code=429, detail=detail)
         if body.username.lower() == ADMIN_USERNAME:
             raise HTTPException(status_code=409, detail="that username is taken")
         display = " ".join((body.display_name or body.username).split()) or body.username
@@ -540,6 +607,9 @@ def create_postgres_app(settings: Settings) -> FastAPI:
         repo_root=REPO_ROOT,
         model_name=f"{settings.llm_provider}:{settings.llm_model}",
         paper_watchlist=paper_watchlist(settings),
+        daily_turn_cap=settings.llm_daily_turn_cap,
+        trader_daily_turn_cap=settings.trader_daily_turn_cap,
+        history_turns=settings.trader_history_turns,
     )
     password = settings.admin_password.get_secret_value() if settings.admin_password else None
     secret = settings.trader_token_secret.get_secret_value() if settings.trader_token_secret else ""
@@ -552,8 +622,14 @@ def create_postgres_app(settings: Settings) -> FastAPI:
         chat=chat,
         jaeger_ui_url=settings.jaeger_ui_url,
         admin=AdminAuth(password),
-        accounts=Accounts(store=_Late(holder, "traders"), tokens=TraderTokens(secret)),
+        accounts=Accounts(
+            store=_Late(holder, "traders"),
+            tokens=TraderTokens(secret),
+            signups=IpLimiter(settings.signups_per_ip_per_hour),
+        ),
         feed=feed,
+        cors_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
+        trust_proxy=settings.trust_proxy,
     )
 
     async def poll_forever(live: LiveFeed) -> None:

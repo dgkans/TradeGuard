@@ -86,3 +86,63 @@ jobs:
       - name: Stop stack
         if: always()
         run: docker compose down -v
+
+  # The production image (F12): build it, start it the way Render does, wait for /readyz.
+  image:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.10-alpine
+        env:
+          POSTGRES_USER: tradeguard
+          POSTGRES_PASSWORD: tradeguard
+          POSTGRES_DB: tradeguard
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U tradeguard"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t tradeguard:ci .
+
+      - name: Start with production settings (dummy secrets, no live prices in CI)
+        run: |
+          docker run -d --name api --network host \
+            -e PORT=8000 \
+            -e DATABASE_URL=postgresql://tradeguard:tradeguard@localhost:5432/tradeguard \
+            -e ADMIN_PASSWORD=ci-only -e TRADER_TOKEN_SECRET=ci-only \
+            -e LLM_PROVIDER=groq -e GROQ_API_KEY=gsk_ci_dummy -e LIVE_PRICES=false \
+            tradeguard:ci
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:8000/readyz && exit 0
+            sleep 2
+          done
+          docker logs api
+          exit 1
+
+      - name: Memory in use (Render free has 512 MB)
+        run: docker stats --no-stream api
+
+      - name: Runs as a non-root user
+        run: test "$(docker exec api id -u)" != "0"
+
+      - name: Logs on failure
+        if: failure()
+        run: docker logs api
+
+  # No secrets anywhere in the history of this public repo (F12).
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

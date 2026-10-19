@@ -83,6 +83,46 @@ class ChatStartError(ChatError):
     status = 502
 
 
+class ChatQuotaError(ChatError):
+    """The free AI budget (daily caps, or the provider's rate limit) is used up (F12)."""
+
+    status = 429
+
+
+class AiUnavailableError(ChatError):
+    """The AI provider failed (bad key, outage, network). Details go to the log only."""
+
+    status = 503
+
+
+AI_RATE_LIMITED = "The AI is at its free usage limit right now. Please try again in a few minutes."
+AI_UNAVAILABLE = "The AI service isn't available right now. Please try again later."
+PROVIDER_MODULES = ("groq", "httpx", "httpcore", "ollama", "langchain_groq", "langchain_ollama")
+
+
+def is_provider_error(exc: BaseException) -> bool:
+    """An error from the AI provider or the network to it, not from TradeGuard itself."""
+    seen: BaseException | None = exc
+    while seen is not None:
+        module = type(seen).__module__.split(".")[0]
+        if module in PROVIDER_MODULES or isinstance(seen, ConnectionError):
+            return True
+        if isinstance(getattr(seen, "status_code", None), int):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def is_rate_limited(exc: BaseException) -> bool:
+    """A provider 429 (Groq's RateLimitError, or anything carrying status 429)."""
+    seen: BaseException | None = exc
+    while seen is not None:
+        if getattr(seen, "status_code", None) == 429 or type(seen).__name__ == "RateLimitError":
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 @dataclass(frozen=True)
 class ChatSpec:
     """What a session runs: a scenario, through the gateway (with a policy) or direct."""
@@ -153,7 +193,10 @@ class ChatSession:
     async def _work(self, ready: "asyncio.Future[None]") -> None:
         scenario = self.service.find_scenario(self.spec.scenario) or {}
         context = AgentContext(
-            self.spec.scenario, list(scenario.get("watchlist", [])), style=TRADER_STYLE
+            self.spec.scenario,
+            list(scenario.get("watchlist", [])),
+            style=TRADER_STYLE,
+            history_turns=self.service.history_turns or None,
         )
         try:
             connect = self.service.connect(self.spec, self.session_id, self._operator_token)
@@ -204,6 +247,22 @@ class ChatSession:
         await self._jobs.put((func, future))
         return await future
 
+    async def _run(self, func: Callable[[], Awaitable[Any]]) -> Any:
+        """Run a turn. Provider failures become friendly messages (F12): a rate limit is a
+        429, anything else from the provider a 503. The cause is logged, not shown."""
+        try:
+            return await self._submit(func)
+        except ChatError:
+            raise
+        except Exception as exc:
+            if is_rate_limited(exc):
+                logger.warning("AI provider rate limit in %s", self.session_id)
+                raise ChatQuotaError(AI_RATE_LIMITED) from exc
+            if is_provider_error(exc):
+                logger.error("AI provider failed in %s: %s", self.session_id, type(exc).__name__)
+                raise AiUnavailableError(AI_UNAVAILABLE) from exc
+            raise
+
     def _claim(self) -> None:
         if self._lock.locked():
             raise ChatBusyError("this session is already running a turn")
@@ -227,6 +286,7 @@ class ChatSession:
         self._claim()
         if self.pending is not None:
             raise ChatBusyError("waiting for an approval decision: approve or reject it first")
+        self.service.spend_turn(self)
         async with self._lock:
             self.transcript.append({"role": "user", "text": text})
             start = len(self.log.records)
@@ -240,7 +300,11 @@ class ChatSession:
                     self._let_orders_fill()
                 return result
 
-            result = await self._submit(job)
+            try:
+                result = await self._run(job)
+            except (ChatQuotaError, AiUnavailableError):
+                self.service.refund_turn(self)  # the AI never answered: don't charge it
+                raise
             turn = self._finish(result, start)
         await self.service.persist(self)
         return turn
@@ -266,7 +330,7 @@ class ChatSession:
                     self._let_orders_fill()
                 return outcome, result
 
-            outcome, result = await self._submit(job)
+            outcome, result = await self._run(job)
             self.pending = None
             decision = {"role": "decision", **describe_decision(outcome)}
             self.transcript.append(decision)
@@ -419,6 +483,7 @@ class ChatSession:
             "starting_cash": self.spec.starting_cash,
             "busy": self.busy,
             "waiting_for_approval": self.pending is not None,
+            "ai_turns_left": self.service.turns_left(self),
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -461,6 +526,9 @@ class ChatService:
         paper_watchlist: list[str] | None = None,
         feed: LiveFeed | None = None,
         store: TraderStore | None = None,
+        daily_turn_cap: int = 0,
+        trader_daily_turn_cap: int = 0,
+        history_turns: int = 0,
     ) -> None:
         self.connect = connect
         self.models = models
@@ -473,6 +541,12 @@ class ChatService:
         self.paper_watchlist = paper_watchlist
         self.feed = feed
         self.store = store
+        self.daily_turn_cap = daily_turn_cap
+        self.trader_daily_turn_cap = trader_daily_turn_cap
+        self.history_turns = history_turns
+        self._day = datetime.now(UTC).date()
+        self._turns_today = 0
+        self._turns_by_trader: dict[str, int] = {}
         self.sessions: dict[str, ChatSession] = {}
         self._opening: dict[int, asyncio.Lock] = {}
 
@@ -497,6 +571,57 @@ class ChatService:
             session.restore(trader)
             self.sessions[session_id] = session
             return session
+
+    # --- the free AI budget (F12) ------------------------------------------------------
+
+    def _today(self) -> None:
+        today = datetime.now(UTC).date()
+        if today != self._day:
+            self._day = today
+            self._turns_today = 0
+            self._turns_by_trader = {}
+
+    @staticmethod
+    def _who(session: ChatSession) -> str:
+        trader_id = session.spec.trader_id
+        return f"trader-{trader_id}" if trader_id is not None else session.session_id
+
+    def spend_turn(self, session: ChatSession) -> None:
+        """Count one AI turn, or raise ChatQuotaError when a daily cap is reached. Counts
+        live in this process and reset at 00:00 UTC (and on restart)."""
+        self._today()
+        who = self._who(session)
+        if self.daily_turn_cap and self._turns_today >= self.daily_turn_cap:
+            raise ChatQuotaError(
+                "The AI has used today's free budget. Positions and limits still work; "
+                "chat is back after 00:00 UTC."
+            )
+        used = self._turns_by_trader.get(who, 0)
+        if self.trader_daily_turn_cap and used >= self.trader_daily_turn_cap:
+            raise ChatQuotaError(
+                f"You've used your {self.trader_daily_turn_cap} AI requests for today. "
+                "They reset at 00:00 UTC."
+            )
+        self._turns_today += 1
+        self._turns_by_trader[who] = used + 1
+
+    def refund_turn(self, session: ChatSession) -> None:
+        """Give back a turn the AI provider failed to serve."""
+        self._today()
+        who = self._who(session)
+        self._turns_today = max(0, self._turns_today - 1)
+        self._turns_by_trader[who] = max(0, self._turns_by_trader.get(who, 0) - 1)
+
+    def turns_left(self, session: ChatSession) -> int | None:
+        """AI turns this trader has left today, or None when there's no cap."""
+        self._today()
+        left = []
+        if self.daily_turn_cap:
+            left.append(self.daily_turn_cap - self._turns_today)
+        if self.trader_daily_turn_cap:
+            used = self._turns_by_trader.get(self._who(session), 0)
+            left.append(self.trader_daily_turn_cap - used)
+        return max(0, min(left)) if left else None
 
     def settle(self) -> list[ChatSession]:
         """Fill or expire open orders in every live market at the latest prices. Returns the
@@ -665,6 +790,7 @@ def stdio_connector(repo_root: Path) -> Connector:
 
 def settings_models(settings: Settings) -> ModelFactory:
     def models() -> tuple[Any, Any]:
-        return make_chat_model(settings), make_chat_model(settings, json_mode=True)
+        fast = settings.llm_fast_model or None
+        return make_chat_model(settings), make_chat_model(settings, json_mode=True, model=fast)
 
     return models

@@ -662,3 +662,44 @@ Consequences:
   terms don't allow redistribution. That's fine for a local demo; a public deployment
   needs a licensed data source (F12).
 - Desk numbers aren't reproducible, by design; eval numbers still are.
+
+## D024: Free live deployment: Render, Neon, Cloudflare Pages, Groq (F12)
+Date: 2026-10-18
+Decision (user choices):
+- Render free web service (Docker) for the API, Neon for Postgres, Cloudflare Pages for the
+  dashboard, Groq for the AI, and UptimeRobot to keep the API awake.
+- Every approved feature is pushed to `main` and deploys automatically. Render deploys only
+  after GitHub CI passes; Cloudflare builds only if the dashboard's checks pass.
+- **Live, not "replay only":** PLAN 13.2 planned a replay-only demo with a recorded runs
+  gallery. The user wants live prices and real accounts in production, so the demo is the
+  product. The gallery is dropped for now: it existed to cover a cold start, and the API is
+  kept awake.
+- **Fitting Groq's free plan** (checked 2026-10-18): `gpt-oss-120b` and `gpt-oss-20b` each
+  allow 30 requests and 8K tokens a minute, and 1K requests and 200K tokens a day.
+  - The agent acts on 120b; the classify step and the judge use 20b, because limits are
+    per model.
+  - Short hidden reasoning, and up to 5 retries that honour `retry-after`.
+  - Trader chats send only the last 3 turns to the model. Evals and the CLI are unchanged.
+  - Daily caps: 30 turns in all and 10 per trader, counted in memory, reset at 00:00 UTC
+    and on restart. A failed turn is refunded.
+- **Neon suspends idle databases:** every store's connection is checked with `select 1`
+  after 30 s idle and replaced if dead. A statement is never retried, so writes can't be
+  doubled.
+- **Production fails closed:** no start without the admin password, the token secret and a
+  cloud AI key. CORS allows only the dashboard. An unhandled error answers in plain words.
+- **Public repo:** gitleaks found no secrets in the history (26 commits) or the client
+  bundle. CI scans every push.
+Alternatives considered:
+- Hugging Face Spaces: 16 GB free, but July 2026 reports say Docker Spaces need a paid plan
+  for new accounts.
+- Supabase: pauses after 7 days without activity, and needs a manual restore.
+- Vercel Hobby: non-commercial use only.
+- Fly.io, Railway, Koyeb: no free plan for new accounts (PLAN 13.1).
+- Gemini: unclear daily limits; free-tier data is used by Google.
+Consequences and risks:
+- About 10 to 30 AI turns a day in total; more needs a paid plan or another provider.
+- Yahoo may throttle Render's shared addresses; it is checked after the first deploy, with
+  a free Finnhub key as the fallback.
+- The eval numbers in RESULTS.md are for qwen3:8b on Ollama. The live site runs gpt-oss on
+  Groq and has no eval numbers of its own (PLAN 15.2 rule 2).
+- Caps reset when the API restarts (each deploy).

@@ -307,6 +307,60 @@ creates the tables. Open it with
 `psql "postgresql://tradeguard:tradeguard@localhost:5432/tradeguard"`; accounts are in
 `traders`, decisions in `audit_events` and `approvals`.
 
+## Deploy (F12): free, live, auto-deploying
+
+| Piece | Host (free plan, no card) | What it runs |
+|---|---|---|
+| API, trader sessions, gateway, live prices | Render web service (`render.yaml`, `Dockerfile`) | One container, 512 MB; migrates on start |
+| Postgres | Neon | Accounts, audit log, approvals; open it with psql, TablePlus or Neon's SQL editor |
+| Dashboard | Cloudflare Pages | The static React build; it calls the API with `VITE_API_URL` |
+| AI | Groq | `openai/gpt-oss-120b` acts, `openai/gpt-oss-20b` classifies and judges |
+| Keep awake | UptimeRobot | Pings `/healthz` every 5 minutes |
+
+Every push to `main` deploys by itself:
+- Render waits for GitHub CI (tests, the Docker image, a secret scan) to pass.
+- Cloudflare runs the dashboard's lint, tests and build, then publishes.
+
+Secrets live only in the Render dashboard, never in git or the client bundle. Production
+refuses to start without `ADMIN_PASSWORD`, `TRADER_TOKEN_SECRET` and the Groq key.
+
+**Free plan guard rails:**
+- Groq allows about 200K tokens a day on the main model, so the site caps AI turns per day
+  (30 in all, 10 per trader, in `render.yaml`) and shows "N AI requests left today".
+- Rate limits and provider outages show a plain message, and a failed turn isn't counted.
+- Sign ups are limited per address.
+- Neon suspends an idle database; every store reconnects on its own.
+
+### Owner steps (once)
+
+1. **Groq:** sign up at console.groq.com and create an API key. Keep it to paste into
+   Render, never into chat or git.
+2. **Neon:** sign up at neon.tech and create a project in AWS US West (Oregon), Postgres 16.
+   Under *Connect*, turn **Connection pooling off** and copy the connection string (it ends
+   in `?sslmode=require`).
+3. **Render:** sign up with GitHub, then *New → Blueprint* and pick `dgkans/TradeGuard`.
+   Render reads `render.yaml` and asks for:
+   - `DATABASE_URL`: the Neon string;
+   - `GROQ_API_KEY`;
+   - `ADMIN_PASSWORD`: choose a strong one;
+   - `CORS_ORIGINS`: type `https://example.com` for now.
+
+   Deploy. The API gets an address like `https://tradeguard-api.onrender.com`.
+4. **Cloudflare Pages:** *Workers & Pages → Create → Pages → Connect to Git* and pick the
+   repo. Use:
+   - root directory `dashboard`;
+   - build command `npm ci && npm run check`;
+   - output directory `dist`;
+   - environment variable `VITE_API_URL` set to the Render address.
+
+   The site gets an address like `https://tradeguard.pages.dev`.
+5. **Back in Render:** set `CORS_ORIGINS` to the Pages address. Render redeploys.
+6. **UptimeRobot:** add an HTTP monitor for `https://<render address>/healthz` every 5
+   minutes. This keeps the API awake, using about all of Render's 750 free hours.
+
+Check it: open the Pages address, sign up, ask "What is NVDA at?", and log in as `admin`.
+`https://<render address>/readyz` should show `"database":"ok","prices":"ok"`.
+
 ## Alpaca paper trading (F11)
 
 The same guard in front of a real broker API, **paper only**. TradeGuard runs Alpaca's

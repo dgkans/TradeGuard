@@ -221,6 +221,12 @@ export function ChatPage({ session }: { session: SessionInfo }) {
                   }} />
         <button type="submit" className="button" disabled={working || !text.trim()}>Send</button>
       </form>
+      {typeof session.ai_turns_left === "number" ? (
+        <p className="muted small turns-left">
+          {session.ai_turns_left === 1 ? "1 AI request" : `${session.ai_turns_left} AI requests`}{" "}
+          left today
+        </p>
+      ) : null}
       <ErrorNote error={error} />
     </section>
   );

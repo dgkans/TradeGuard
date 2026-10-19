@@ -22,6 +22,8 @@ from typing import Any, Protocol
 import psycopg
 from psycopg.types.json import Jsonb
 
+from services.common.pg import ResilientConnection
+
 SCRYPT_N = 2**14
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -138,6 +140,8 @@ class TraderStore(Protocol):
 
     async def delete(self, trader_id: int) -> None: ...
 
+    async def ping(self) -> None: ...
+
 
 class MemoryTraderStore:
     """For tests and runs without a database."""
@@ -179,6 +183,9 @@ class MemoryTraderStore:
     async def delete(self, trader_id: int) -> None:
         self._traders.pop(trader_id, None)
 
+    async def ping(self) -> None:
+        return None
+
 
 COLUMNS = ("id, username, display_name, password_hash, profile, starting_cash, limits, "
            "book, transcript")  # fmt: skip
@@ -194,11 +201,11 @@ class PostgresTraderStore:
 
     def __init__(self, url: str) -> None:
         self.url = url
-        self._conn: psycopg.AsyncConnection[Any] | None = None
+        self._conn: ResilientConnection | None = None
         self._lock = asyncio.Lock()
 
     async def __aenter__(self) -> "PostgresTraderStore":
-        self._conn = await psycopg.AsyncConnection.connect(self.url, autocommit=True)
+        self._conn = await ResilientConnection.connect(self.url, autocommit=True)
         return self
 
     async def __aexit__(self, exc_type: type[BaseException] | None,
@@ -207,7 +214,7 @@ class PostgresTraderStore:
             await self._conn.close()
             self._conn = None
 
-    def _connection(self) -> psycopg.AsyncConnection[Any]:
+    def _connection(self) -> ResilientConnection:
         if self._conn is None:
             raise RuntimeError("trader store is not connected")
         return self._conn
@@ -263,3 +270,7 @@ class PostgresTraderStore:
     async def delete(self, trader_id: int) -> None:
         async with self._lock:
             await self._connection().execute("delete from traders where id = %s", (trader_id,))
+
+    async def ping(self) -> None:
+        """Raises if the database doesn't answer."""
+        await self._one("select 1", ())

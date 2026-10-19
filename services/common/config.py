@@ -16,7 +16,15 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 ALPACA_PAPER_HOST = "paper-api.alpaca.markets"
 # Name of the env var carrying the gateway operator token (services/gateway).
@@ -68,6 +76,9 @@ class Settings(BaseModel):
     llm_model: str = Field(default="qwen3:8b", alias="LLM_MODEL")
     judge_model: str = Field(default="qwen3:8b", alias="JUDGE_MODEL")
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+    # A smaller model for the quick JSON steps (classify the request, the intent judge's
+    # default); empty means LLM_MODEL. On Groq each model has its own free budget (F12).
+    llm_fast_model: str = Field(default="", alias="LLM_FAST_MODEL")
     groq_api_key: SecretStr | None = Field(default=None, alias="GROQ_API_KEY")
     gemini_api_key: SecretStr | None = Field(default=None, alias="GEMINI_API_KEY")
 
@@ -84,6 +95,13 @@ class Settings(BaseModel):
         default=300, ge=30, le=3600, alias="LIVE_CLOSED_POLL_SECONDS"
     )
     paper_watchlist: str = Field(default="NVDA,AMD,AAPL,MSFT,TSLA", alias="PAPER_WATCHLIST")
+    # Public deployment (F12). Caps are AI turns per UTC day; 0 means no cap.
+    llm_daily_turn_cap: int = Field(default=0, ge=0, alias="LLM_DAILY_TURN_CAP")
+    trader_daily_turn_cap: int = Field(default=0, ge=0, alias="TRADER_DAILY_TURN_CAP")
+    trader_history_turns: int = Field(default=0, ge=0, le=50, alias="TRADER_HISTORY_TURNS")
+    signups_per_ip_per_hour: int = Field(default=5, ge=1, alias="SIGNUPS_PER_IP_PER_HOUR")
+    cors_origins: str = Field(default="", alias="CORS_ORIGINS")  # comma separated
+    trust_proxy: bool = Field(default=False, alias="TRUST_PROXY")  # behind Render's proxy
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO", alias="LOG_LEVEL"
@@ -99,6 +117,24 @@ class Settings(BaseModel):
                 "(ollama, groq, gemini). See PLAN.md Section 16."
             )
         return value
+
+    @model_validator(mode="after")
+    def production_needs_its_secrets(self) -> "Settings":
+        """A public deployment must not start half configured (fail closed, F12)."""
+        if self.tradeguard_env != "production":
+            return self
+        missing = []
+        if self.admin_password is None:
+            missing.append("ADMIN_PASSWORD")
+        if self.trader_token_secret is None:
+            missing.append("TRADER_TOKEN_SECRET")
+        if self.llm_provider == "ollama":
+            missing.append("LLM_PROVIDER (a cloud provider, e.g. groq)")
+        if self.llm_provider == "groq" and self.groq_api_key is None:
+            missing.append("GROQ_API_KEY")
+        if missing:
+            raise ValueError("production needs " + ", ".join(missing))
+        return self
 
     @field_validator("log_level", mode="before")
     @classmethod

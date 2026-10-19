@@ -21,7 +21,7 @@
 | F10e Trader accounts and live replay | done | 2026-10-18 |
 | F10f Live prices, one login form | done | 2026-10-18 |
 | F11 Alpaca paper | deferred by user (adapter built and tested against a stand-in) | |
-| F12 Deployment | not started | |
+| F12 Deployment | in progress | |
 | F13 Impact and beta | not started | |
 | F14 Ship it | not started | |
 
@@ -653,3 +653,44 @@ Work:
 - Evals: none affected (evals stay on replay).
 - Gaps: agent memory across restarts; the Yahoo data source isn't licensed for public use.
 - Next: F12 Deployment (hosting decision pending; it needs a licensed data source if public).
+
+## Current feature: F12 Deployment (user decisions 2026-10-18)
+### Plan
+User choices: Render (API) + Neon (Postgres) + Cloudflare Pages (dashboard), Groq for the AI, the backend kept awake by an uptime ping, and a push to GitHub after each approved feature (it auto-deploys). Live prices and accounts stay on (F10f), replacing PLAN 13.2's "replay only" demo mode.
+- **AI on Groq:**
+  - `LLM_PROVIDER=groq`. The agent uses `openai/gpt-oss-120b` and the intent judge `openai/gpt-oss-20b` (Groq limits are per model, so the free budget doubles).
+  - JSON mode for the understand step and the judge. The key is read only from the host's settings.
+- **Free tier guard rails:**
+  - Daily AI turn caps, for the whole site and per trader. When reached, a friendly "try again tomorrow" message.
+  - Groq rate limit errors show the same friendly message.
+  - Sign up is limited per IP address; logins already lock after repeated failures.
+- **Neon resilience:** Neon suspends the database when idle, which kills open connections. Every Postgres store checks its connection after an idle spell and reconnects first, never retrying a write.
+- **Production server:**
+  - A multi stage Dockerfile, run as a non-root user, holding no secrets.
+  - On start it migrates, then serves on `0.0.0.0:$PORT`.
+  - `/readyz` checks the database and live prices.
+  - CORS allows only the dashboard's address.
+  - Production refuses to start without the admin password, the token secret and a cloud AI key.
+  - Tracing is off; Trace links are hidden when there's no trace viewer.
+- **Deploy config in the repo:**
+  - `render.yaml` with a free web service that deploys only after GitHub CI passes; secrets are entered in Render, never in git.
+  - Cloudflare Pages builds `dashboard/`, runs its checks, and publishes. It has security headers and hash routing, so no rewrites.
+  - CI gains a Docker build and a secret scan.
+- **Before the first push:** scan the whole git history for secrets; the repo is public.
+- **Owner steps** (sign-ups, done by the user; no card): Render, Neon, Cloudflare, Groq and UptimeRobot. Keys go into the host dashboards, never into chat.
+- **After going live:** check that Yahoo answers from Render's servers. If it doesn't, the fallback is a free Finnhub key.
+### Acceptance
+- [x] Groq provider works with tool calls and JSON (tested with a recorded request; a live call waits for the key)
+- [x] Daily caps and per-IP sign-up limits enforced with friendly messages (tested; rate limits 429, provider failures 503, failed turns refunded)
+- [x] Stores survive the database dropping idle connections (tested by killing the connections in Postgres)
+- [x] The production start path runs locally with production settings (migrate, `/readyz` ok, CORS, 223 MB idle); the Docker image is built and started in CI (first run on the first push)
+- [x] No secrets in git history, the image or the client bundle (gitleaks: 26 commits clean, bundle clean; `.env` is ignored by git and Docker)
+- [ ] Push to `main` with passing CI deploys automatically; the public URL works on desktop and phone (after the owner's sign-ups)
+### Notes and open questions
+- Docker isn't installed on this Mac, so the image is first built by CI and Render. The same start command was run locally in production mode.
+- A bad AI key used to show a bare "500 Internal Server Error". Found in the local production run and fixed (friendly 503, plus a JSON backstop for any unexpected error).
+- Groq's free limits are tight (8K tokens a minute, 200K a day on the main model), so about 10 to 30 AI turns a day in total (D024).
+- To check after deploy: Yahoo from Render's addresses (fallback: a free Finnhub key), and memory with several traders (512 MB).
+- The landing page line "Trades are paper only: no real money." was removed (user request).
+### Loop summary
+- Pending until the site is live.

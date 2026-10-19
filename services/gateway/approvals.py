@@ -13,11 +13,11 @@ from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Any, Literal, Protocol
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
+from services.common.pg import ResilientConnection
 from services.gateway.audit import INSERT_DECISION, DecisionRecord, MemoryAuditSink
 
 Status = Literal["pending", "approved", "rejected", "expired", "executing", "executed", "blocked"]
@@ -213,11 +213,11 @@ class PostgresApprovalStore:
 
     def __init__(self, url: str) -> None:
         self.url = url
-        self._conn: psycopg.AsyncConnection[dict[str, Any]] | None = None
+        self._conn: ResilientConnection | None = None
         self._lock = asyncio.Lock()
 
     async def __aenter__(self) -> "PostgresApprovalStore":
-        self._conn = await psycopg.AsyncConnection.connect(
+        self._conn = await ResilientConnection.connect(
             self.url, autocommit=True, row_factory=dict_row
         )
         return self
@@ -232,7 +232,7 @@ class PostgresApprovalStore:
             await self._conn.close()
             self._conn = None
 
-    def _connection(self) -> psycopg.AsyncConnection[dict[str, Any]]:
+    def _connection(self) -> ResilientConnection:
         if self._conn is None:
             raise RuntimeError("approval store is not connected")
         return self._conn
