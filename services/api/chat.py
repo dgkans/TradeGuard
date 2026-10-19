@@ -58,7 +58,9 @@ TRADER_STYLE = (
     "This chat is shown to a retail trader in an app. Answer in short, plain sentences. "
     "Never show order ids, tool names, JSON or field names. After placing an order, say "
     "filled only if the order's status says filled; otherwise say it was sent and is "
-    "waiting. Only state positions, cash or P&L you just read with a tool."
+    "waiting. Only state positions, cash or P&L you just read with a tool. A dollar amount "
+    "(notional) market order buys fractional shares, so any amount works even below one "
+    "share's price: place it as asked."
 )
 
 

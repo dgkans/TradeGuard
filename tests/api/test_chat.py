@@ -652,3 +652,10 @@ async def test_a_replay_account_also_comes_back_after_a_restart() -> None:
     assert back["positions"] == book["positions"]
     assert back["as_of"] >= book["orders"][0]["submitted_at"]  # clock caught up to the book
     assert later["orders"] == book["orders"]
+
+
+def test_traders_are_told_dollar_orders_buy_fractional_shares() -> None:
+    """gpt-oss on Groq refused "Buy $500 of AMD" at $540 a share (F12 live check)."""
+    from services.api.chat import TRADER_STYLE
+
+    assert "fractional shares" in TRADER_STYLE
