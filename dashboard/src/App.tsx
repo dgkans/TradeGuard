@@ -15,7 +15,7 @@ import type { SessionInfo } from "./types";
 
 // Every visitor (a trader) sees these.
 const TRADER = [
-  { path: "chat", label: "Chat" },
+  { path: "chat", label: "Chat & Trade" },
   { path: "positions", label: "Positions" },
   { path: "limits", label: "My limits" },
 ] as const;
