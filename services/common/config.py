@@ -75,6 +75,7 @@ class Settings(BaseModel):
     api_host: str = Field(default="127.0.0.1", alias="API_HOST")
     api_port: int = Field(default=8000, gt=0, lt=65536, alias="API_PORT")
     jaeger_ui_url: str = Field(default="http://localhost:16686", alias="JAEGER_UI_URL")
+    admin_password: SecretStr | None = Field(default=None, alias="ADMIN_PASSWORD")
     paper_watchlist: str = Field(default="NVDA,AMD,AAPL,MSFT,TSLA", alias="PAPER_WATCHLIST")
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(

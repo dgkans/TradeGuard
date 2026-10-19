@@ -8,7 +8,7 @@
 No authentication yet: local use only. F12 adds auth before anything is public.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -45,16 +45,20 @@ def create_app(store: ApprovalStore) -> FastAPI:
     return app
 
 
-def add_approval_routes(app: FastAPI, store: ApprovalStore) -> None:
-    """Mount the approval endpoints on `app` (also used by the dashboard API)."""
+def add_approval_routes(
+    app: FastAPI, store: ApprovalStore, dependencies: Sequence[Any] = ()
+) -> None:
+    """Mount the approval endpoints on `app` (also used by the dashboard API, which passes
+    its admin check in `dependencies`)."""
+    guarded = list(dependencies)
 
-    @app.get("/approvals")
+    @app.get("/approvals", dependencies=guarded)
     async def list_approvals(
         status: str | None = Query(default=None), session_id: str | None = Query(default=None)
     ) -> ApprovalList:
         return ApprovalList(approvals=await store.list(status=status, session_id=session_id))
 
-    @app.get("/approvals/{approval_id}")
+    @app.get("/approvals/{approval_id}", dependencies=guarded)
     async def get_approval(approval_id: str) -> Approval:
         approval = await store.get(approval_id)
         if approval is None:
@@ -71,11 +75,11 @@ def add_approval_routes(app: FastAPI, store: ApprovalStore) -> None:
         except ApprovalConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/approvals/{approval_id}/approve")
+    @app.post("/approvals/{approval_id}/approve", dependencies=guarded)
     async def approve(approval_id: str, body: DecisionBody) -> Approval:
         return await decide(approval_id, True, body)
 
-    @app.post("/approvals/{approval_id}/reject")
+    @app.post("/approvals/{approval_id}/reject", dependencies=guarded)
     async def reject(approval_id: str, body: DecisionBody) -> Approval:
         return await decide(approval_id, False, body)
 

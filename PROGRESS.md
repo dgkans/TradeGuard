@@ -17,6 +17,7 @@
 | F10 Dashboard | done | 2026-10-18 |
 | F10b Trading desk (multi user) | done | 2026-10-18 |
 | F10c Desk polish | done | 2026-10-18 |
+| F10d Limits, market view, admin | done | 2026-10-18 |
 | F11 Alpaca paper | deferred by user (adapter built and tested against a stand-in) | |
 | F12 Deployment | not started | |
 | F13 Impact and beta | not started | |
@@ -529,3 +530,38 @@ Work:
 - Evals: none run. The dashboard now shows existing results exactly as in RESULTS.md.
 - Gaps: CI and Docker unverified; shared local database for tests and the dev stack; F11 real paper check deferred.
 - Next: F12 Deployment, after the user's decision (hosted free tiers that need accounts, or local only).
+
+## F10d Trader limits, market view, admin login (user request 2026-10-18)
+### Plan
+- **Traders edit their own limits** ("My limits"):
+  - Editable: per order, per stock, share of account in stocks, orders per day, the approval line, the large-sale approval, and allowed stocks. Each field is checked against server-side bounds; the profile templates (Standard, Strict) serve as starting points.
+  - Locked on, and shown as such: no short selling, market hours, "did you ask for this?" and "does it match your request?". A trader can't switch off the protections that guard them from the AI.
+  - Changes apply to the live session's gateway at once (its pipeline is rebuilt), and each change is written to the audit log.
+- **Landing and chat in a trading-portal style:**
+  - A market overview (index cards and a watchlist with sparklines, a movers bar chart) from the replay market's own bars.
+  - A market watch panel beside the chat on wide screens.
+  - An allocation donut on Positions.
+  - No made-up data: every chart is drawn from the replay fixtures or the trader's account.
+- **Trader view:** Chat, Positions, My limits, How it works. A trader sees only their own approvals (in the chat) and what the guard stopped for them.
+- **Admin login for the owner only, no database:**
+  - `ADMIN_PASSWORD` in `.env`. The API issues an HMAC-signed token with a 12 hour expiry and a per-process key; failed logins are rate limited. Comparisons are constant time.
+  - Admin only: Approvals (all traders), Audit log, Test results, guard activity across traders. Without the password set, admin is off (fail closed).
+  - Traders approve their own orders through a per-session endpoint that checks the approval belongs to their session.
+- No trader logins (user decision): anyone at the local URL can start or end a trader session.
+### Acceptance
+- [x] A trader changes a limit and the next order is checked against it (tested); bounds enforced and protections locked (tested, 10 refusal cases)
+- [x] Admin pages and endpoints need the admin token; traders can approve only their own orders (tested; live: anonymous /audit 401, with the admin token 200)
+- [x] Landing, chat side panel and Positions show charts from real replay and account data (tested and screenshot; all pages exactly 390 px wide on phones)
+### Notes and open questions
+- The admin password was generated into `.env` (gitignored, mode 600). It is never printed; the owner can read or change it there.
+- A browser form check (step=5 on a field with min=1) silently blocked saving limits; the form now relies on its own clearer checks (`noValidate`).
+### Loop summary
+- Built:
+  - Editable trader limits (bounded, protections locked, audited, applied live).
+  - Owner-only admin login (HMAC tokens, no database) guarding approvals, audit, guard activity and test results.
+  - Per-session approvals.
+  - A market overview, a market watch panel and an allocation donut.
+- Tests: Python 456 passing, 1 skipped (`make check` clean); Vitest 43 passing; build OK.
+- Evals: none affected (gateway rules unchanged; `update_policy` only swaps the policy).
+- Gaps: no trader identity (local demo only); limits are lost when a session ends.
+- Next: F12 Deployment (hosting decision pending).

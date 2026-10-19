@@ -1,23 +1,26 @@
-"""Dashboard API: approvals, audit log, policies, eval reports and chat sessions.
+"""Dashboard API: trader sessions, positions and limits, market data, and an owner-only
+admin area (approvals, audit log, eval reports).
 
     uv run tradeguard api                      # http://127.0.0.1:8000, docs at /docs
 
-No authentication yet: it binds to 127.0.0.1 for local use. F12 adds auth before anything
-is public. Paper/replay only, like everything else: chat sessions run replay scenarios.
+Traders don't log in (user decision, F10d); the admin area needs ADMIN_PASSWORD
+(services/api/admin.py). The API binds to 127.0.0.1 for local use. Paper/replay only:
+trader sessions run replay scenarios.
 """
 
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from services.alpaca_adapter.adapter import PaperModeError, require_paper_settings
-from services.api import catalog
+from services.api import catalog, market
+from services.api.admin import AdminAuth, AdminDisabledError, AdminLockedError, AdminLoginError
 from services.api.chat import (
     ChatError,
     ChatService,
@@ -26,10 +29,15 @@ from services.api.chat import (
     settings_models,
 )
 from services.api.describe import RULE_TITLES
+from services.api.limits import Limits
 from services.common.config import Settings
 from services.common.llm import make_chat_model
 from services.gateway.api.app import add_approval_routes
-from services.gateway.approvals import ApprovalStore, PostgresApprovalStore
+from services.gateway.approvals import (
+    ApprovalConflictError,
+    ApprovalStore,
+    PostgresApprovalStore,
+)
 from services.gateway.audit import (
     AuditQuery,
     AuditReader,
@@ -38,6 +46,7 @@ from services.gateway.audit import (
     check_schema,
 )
 from services.gateway.intent.judge import LlmJudge
+from services.gateway.policy.model import load_policy
 from services.gateway.provenance.store import PostgresProvenanceStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +60,7 @@ class ApiDeps:
     chat: ChatService | None = None
     repo_root: Path = REPO_ROOT
     jaeger_ui_url: str = "http://localhost:16686"
+    admin: AdminAuth = field(default_factory=lambda: AdminAuth(None))  # off unless configured
 
 
 class ChatCreate(BaseModel):
@@ -65,6 +75,14 @@ class ChatMessage(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
 
 
+class AdminLogin(BaseModel):
+    password: str = Field(max_length=200)
+
+
+class TraderDecision(BaseModel):
+    note: str = Field(default="", max_length=2000)
+
+
 def create_app(deps: ApiDeps) -> FastAPI:
     """The dashboard API over the given stores. Errors are JSON `{"detail": ...}`."""
     app = FastAPI(title="TradeGuard API", version="0.2.0")
@@ -77,15 +95,42 @@ def create_app(deps: ApiDeps) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    add_approval_routes(app, deps.approvals)
-    add_audit_routes(app, deps)
-    add_catalog_routes(app, deps.repo_root, deps.chat)
+    async def require_admin(authorization: str | None = Header(default=None)) -> None:
+        token = (authorization or "").removeprefix("Bearer ").strip()
+        if not deps.admin.verify(token):
+            raise HTTPException(status_code=401, detail="admin login required")
+
+    admin_only = [Depends(require_admin)]
+
+    @app.post("/admin/login")
+    async def admin_login(body: AdminLogin) -> dict[str, str]:
+        try:
+            issued = deps.admin.login(body.password)
+        except AdminDisabledError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except AdminLockedError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except AdminLoginError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        return {"token": issued.token, "expires_at": issued.expires_at}
+
+    @app.get("/admin/me", dependencies=admin_only)
+    async def admin_me() -> dict[str, bool]:
+        return {"admin": True}
+
+    @app.get("/market/overview")
+    async def market_overview() -> dict[str, Any]:
+        return market.overview(deps.repo_root)
+
+    add_approval_routes(app, deps.approvals, dependencies=admin_only)
+    add_audit_routes(app, deps, admin_only)
+    add_catalog_routes(app, deps.repo_root, deps.chat, admin_only)
     add_chat_routes(app, deps)
     return app
 
 
-def add_audit_routes(app: FastAPI, deps: ApiDeps) -> None:
-    @app.get("/audit")
+def add_audit_routes(app: FastAPI, deps: ApiDeps, admin_only: list[Any]) -> None:
+    @app.get("/audit", dependencies=admin_only)
     async def audit(
         session_id: str | None = Query(default=None, max_length=200),
         decision: str | None = Query(default=None),
@@ -109,20 +154,27 @@ def add_audit_routes(app: FastAPI, deps: ApiDeps) -> None:
                 next_before = None
         return {"events": events, "next_before_id": next_before}
 
-    @app.get("/rules/fired")
+    @app.get("/rules/fired", dependencies=admin_only)
     async def rules_fired(
         scope: str | None = Query(default=None, pattern="^traders$"),
     ) -> dict[str, Any]:
         """Blocked and held counts per rule; `scope=traders` counts dashboard sessions only
         (not CLI, eval or test runs that share the database)."""
         prefix = "web-" if scope == "traders" else None
-        rules = await deps.audit.rule_counts(session_prefix=prefix)
-        for rule in rules:
-            rule["title"] = RULE_TITLES.get(str(rule["rule_id"]), str(rule["rule_id"]))
-        return {"rules": rules}
+        return {"rules": titled(await deps.audit.rule_counts(session_prefix=prefix))}
 
 
-def add_catalog_routes(app: FastAPI, root: Path, chat: ChatService | None = None) -> None:
+def titled(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for rule in rules:
+        rule["title"] = RULE_TITLES.get(str(rule["rule_id"]), str(rule["rule_id"]))
+    return rules
+
+
+def add_catalog_routes(
+    app: FastAPI, root: Path, chat: ChatService | None = None, admin_only: list[Any] | None = None
+) -> None:
+    guarded = admin_only or []
+
     @app.get("/policies")
     async def policies() -> dict[str, Any]:
         return {"policies": catalog.list_policies(root)}
@@ -137,11 +189,11 @@ def add_catalog_routes(app: FastAPI, root: Path, chat: ChatService | None = None
             raise HTTPException(status_code=404, detail=f"no policy {name}")
         return data
 
-    @app.get("/evals")
+    @app.get("/evals", dependencies=guarded)
     async def evals() -> dict[str, Any]:
         return {"reports": catalog.list_reports(root)}
 
-    @app.get("/evals/latest")
+    @app.get("/evals/latest", dependencies=guarded)
     async def latest_eval(
         agent: str | None = Query(default=None, pattern="^attacker$"),
     ) -> dict[str, Any]:
@@ -152,7 +204,7 @@ def add_catalog_routes(app: FastAPI, root: Path, chat: ChatService | None = None
             raise HTTPException(status_code=404, detail="no full suite eval report yet")
         return {"name": found[0], "report": found[1]}
 
-    @app.get("/evals/{name}")
+    @app.get("/evals/{name}", dependencies=guarded)
     async def eval_report(name: str) -> dict[str, Any]:
         data = catalog.read_report(root, name)
         if data is None:
@@ -204,6 +256,51 @@ def add_chat_routes(app: FastAPI, deps: ApiDeps) -> None:
     async def portfolio(session_id: str) -> dict[str, Any]:
         return service().get(session_id).portfolio()
 
+    async def decide_own(session_id: str, approval_id: str, approve: bool,
+                         body: TraderDecision) -> Any:  # fmt: skip
+        """A trader decides an approval only if it belongs to their own session."""
+        session = service().get(session_id)
+        approval = await deps.approvals.get(approval_id)
+        if approval is None or approval.session_id != session_id:
+            raise HTTPException(status_code=404, detail="no such approval in this session")
+        try:
+            return await deps.approvals.decide(
+                approval_id, approve=approve, decided_by=session.spec.user, note=body.note
+            )
+        except ApprovalConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/chat/sessions/{session_id}/approvals/{approval_id}/approve")
+    async def approve_own(session_id: str, approval_id: str, body: TraderDecision) -> Any:
+        return await decide_own(session_id, approval_id, True, body)
+
+    @app.post("/chat/sessions/{session_id}/approvals/{approval_id}/reject")
+    async def reject_own(session_id: str, approval_id: str, body: TraderDecision) -> Any:
+        return await decide_own(session_id, approval_id, False, body)
+
+    @app.get("/chat/sessions/{session_id}/limits")
+    async def get_limits(
+        session_id: str, template: str | None = Query(default=None, max_length=100)
+    ) -> dict[str, Any]:
+        """The trader's current limits, or a profile template's (Standard, Strict)."""
+        session = service().get(session_id)
+        if template is None:
+            return session.limits()
+        path = catalog.policy_path(deps.repo_root, template)
+        if path is None:
+            raise HTTPException(status_code=404, detail=f"no profile {template}")
+        return session.limits(load_policy(path))
+
+    @app.put("/chat/sessions/{session_id}/limits")
+    async def put_limits(session_id: str, body: Limits) -> dict[str, Any]:
+        return await service().get(session_id).set_limits(body)
+
+    @app.get("/chat/sessions/{session_id}/stopped")
+    async def stopped(session_id: str) -> dict[str, Any]:
+        """What the guard blocked or held for this trader (their session only)."""
+        service().get(session_id)
+        return {"rules": titled(await deps.audit.rule_counts(session_prefix=session_id))}
+
     @app.delete("/chat/sessions/{session_id}", status_code=204)
     async def close(session_id: str) -> None:
         await service().close(session_id)
@@ -250,11 +347,13 @@ def create_postgres_app(settings: Settings) -> FastAPI:
         model_name=f"{settings.llm_provider}:{settings.llm_model}",
         paper_watchlist=paper_watchlist(settings),
     )
+    password = settings.admin_password.get_secret_value() if settings.admin_password else None
     deps = ApiDeps(
         approvals=_Late(holder, "approvals"),
         audit=_Late(holder, "audit"),
         chat=chat,
         jaeger_ui_url=settings.jaeger_ui_url,
+        admin=AdminAuth(password),
     )
 
     @asynccontextmanager

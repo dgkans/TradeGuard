@@ -233,13 +233,25 @@ make dashboard-check     # eslint (no `any`), tsc, vitest, production build
   positions and has its own approvals and audit trail. Each trader has an End button in
   the sidebar. There is no sign in.
 
-**Operator** (the broker's risk desk):
-- **Approvals:** every trader's pending orders.
-- **Audit log:** every decision, with Jaeger trace links.
-- **Risk profiles:** each profile's rules in plain words, and what the guard stopped
-  for traders.
-- **Test results:** the latest eval in plain words, the worst case run, and the full
-  tables on request.
+- **My limits:** each trader edits their own limits within bounds:
+  - per order and per stock;
+  - share of account in stocks;
+  - orders per day;
+  - the approval line, and approval for large sales;
+  - which stocks the agent may trade.
+
+  Changes apply to the next order and are written to the audit log. The protections
+  against the AI (did you ask for it, does it match) plus market hours and no shorting are
+  always on.
+- **Market view:** the landing page shows index and watchlist cards with sparklines and a
+  top movers chart. A market watch panel sits beside the chat, and an allocation donut on
+  Positions. All of it is drawn from the replay data and the trader's account.
+
+**Admin** (the owner only; `ADMIN_PASSWORD` in `.env`, no database): **Approvals** (every
+trader), **Audit log**, **Guard activity** (what was stopped across traders, and the policy
+files), and **Test results**. The API refuses these without the admin token. Tokens are
+HMAC signed, expire after 12 hours, and die when the API restarts; repeated wrong
+passwords lock the login for 5 minutes. Traders approve only their own orders, in chat.
 
 The **How it works** button explains the flow (You → AI agent → TradeGuard → Broker) with
 a worked example, and how a broker plugs it in.

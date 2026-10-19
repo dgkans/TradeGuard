@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
+from services.api.admin import AdminAuth
 from services.api.app import ApiDeps, create_app
 from services.api.chat import ChatService, ChatSpec, GatewayStores, inprocess_connector
 from services.gateway.approvals import MemoryApprovalStore
@@ -35,8 +36,9 @@ class Stack:
             repo_root=REPO_ROOT,
             poll_seconds=0.05,
         )
+        self.admin = AdminAuth("test-admin")
         deps = ApiDeps(approvals=self.approvals, audit=MemoryAuditReader(self.audit),
-                       chat=self.chat, repo_root=REPO_ROOT)  # fmt: skip
+                       chat=self.chat, repo_root=REPO_ROOT, admin=self.admin)  # fmt: skip
         self.app = create_app(deps)
 
     def models(self) -> tuple[Any, Any]:
@@ -47,6 +49,7 @@ class Stack:
         return self.chat.get(session_id).market
 
     def client(self) -> httpx.AsyncClient:
+        """A trader's client: no admin token."""
         transport = httpx.ASGITransport(app=self.app)
         return httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30)
 
@@ -136,8 +139,10 @@ async def test_escalated_order_waits_for_the_human_then_executes_and_fills() -> 
         resume = asyncio.create_task(client.post(f"/chat/sessions/{session_id}/resume"))
         await asyncio.sleep(0.2)
         assert not resume.done()  # waiting on the human
-        decided = await client.post(f"/approvals/{pending['approval_id']}/approve",
-                                    json={"decided_by": "Asha", "note": "ok"})  # fmt: skip
+        decided = await client.post(
+            f"/chat/sessions/{session_id}/approvals/{pending['approval_id']}/approve",
+            json={"note": "ok"},
+        )
         assert decided.status_code == 200
         done = (await resume).json()
         state = (await client.get(f"/chat/sessions/{session_id}")).json()
@@ -327,3 +332,91 @@ async def test_a_new_trader_starts_empty_with_the_chosen_cash() -> None:
     assert books[1]["cash"] == 250000.0 and books[1]["positions"] == []
     assert info["starting_cash"] == 250000.0
     assert too_much.status_code == 422 and too_little.status_code == 422
+
+
+# --- F10d: own approvals only, editable limits, what the guard stopped for you ----------
+
+
+async def test_a_trader_approves_their_own_order_but_not_someone_elses() -> None:
+    stack = Stack([order_script("Bought after approval."), quote_script()])
+    async with stack.client() as client:
+        asha = await start(client, "Asha")
+        ben = await start(client, "Ben")
+        first = await send(client, asha, "Buy $1500 of NVDA")
+        approval_id = first["pending_approval"]["approval_id"]
+        resume = asyncio.create_task(client.post(f"/chat/sessions/{asha}/resume"))
+        stolen = await client.post(f"/chat/sessions/{ben}/approvals/{approval_id}/approve",
+                                   json={"note": "mine now"})  # fmt: skip
+        own = await client.post(f"/chat/sessions/{asha}/approvals/{approval_id}/approve",
+                                json={"note": "ok"})  # fmt: skip
+        done = (await resume).json()
+        for sid in (asha, ben):
+            await client.delete(f"/chat/sessions/{sid}")
+    assert stolen.status_code == 404  # not Ben's approval
+    assert own.status_code == 200 and own.json()["decided_by"] == "Asha"
+    assert done["decision"]["status"] == "executed"
+
+
+async def test_a_trader_edits_limits_and_the_next_order_is_checked_against_them() -> None:
+    stack = Stack([order_script("Too big now.", notional=800, symbol="AMD")])
+    async with stack.client() as client:
+        sid = await start(client, "Asha")
+        before = (await client.get(f"/chat/sessions/{sid}/limits")).json()
+        changed = await client.put(
+            f"/chat/sessions/{sid}/limits",
+            json={**before["limits"], "max_order_usd": 500, "approval_over_usd": 300},
+        )
+        turn = await send(client, sid, "Buy $800 of AMD")
+        stopped = (await client.get(f"/chat/sessions/{sid}/stopped")).json()["rules"]
+        await client.delete(f"/chat/sessions/{sid}")
+    assert before["limits"]["max_order_usd"] == 2000  # Standard profile
+    assert before["locked"] == ["No short selling", "Only while the market is open",
+                                "Orders you didn't ask for are blocked",
+                                "Each order must match what you asked"]  # fmt: skip
+    assert changed.status_code == 200 and changed.json()["limits"]["max_order_usd"] == 500
+    step = turn["steps"][0]
+    assert step["status"] == "blocked" and "$500" in step["reason"]
+    assert stopped == [{"rule_id": "max_order_notional", "decision": "DENY", "count": 1,
+                        "title": "Order is over your per-order limit"}]  # fmt: skip
+    changes = [e for e in stack.audit.events if e["tool"] == "update_limits"]
+    assert len(changes) == 1 and changes[0]["args"]["max_order_usd"] == 500
+
+
+@pytest.mark.parametrize(
+    ("change", "field"),
+    [
+        ({"max_order_usd": 50}, "max_order_usd"),
+        ({"max_order_usd": 2_000_000}, "max_order_usd"),
+        ({"max_position_usd": 100, "max_order_usd": 500}, "max_position_usd"),
+        ({"max_exposure_pct": 150}, "max_exposure_pct"),
+        ({"max_orders_per_day": 0}, "max_orders_per_day"),
+        ({"approval_over_usd": 5000}, "approval_over_usd"),
+        ({"allowed_symbols": []}, "allowed_symbols"),
+        ({"allowed_symbols": ["NVDA", "DOGECOIN"]}, "allowed_symbols"),
+        ({"allow_short": True}, "allow_short"),
+        ({"taint": False}, "taint"),
+    ],
+)
+async def test_limits_are_bounded_and_protections_stay_on(
+    change: dict[str, Any], field: str
+) -> None:
+    stack = Stack([quote_script()])
+    async with stack.client() as client:
+        sid = await start(client, "Asha")
+        current = (await client.get(f"/chat/sessions/{sid}/limits")).json()["limits"]
+        response = await client.put(f"/chat/sessions/{sid}/limits", json={**current, **change})
+        await client.delete(f"/chat/sessions/{sid}")
+    assert response.status_code == 422, response.text
+    assert field in response.text
+
+
+async def test_limits_can_start_from_a_profile_template() -> None:
+    stack = Stack([quote_script()])
+    async with stack.client() as client:
+        sid = await start(client, "Asha")
+        strict = (await client.get(f"/chat/sessions/{sid}/limits",
+                                   params={"template": "strict"})).json()  # fmt: skip
+        await client.delete(f"/chat/sessions/{sid}")
+    assert strict["limits"]["max_order_usd"] == 500
+    assert strict["limits"]["allowed_symbols"] == ["SPY", "QQQ", "AAPL", "MSFT"]
+    assert "NVDA" in strict["universe"]

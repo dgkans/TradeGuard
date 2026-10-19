@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from services.api.admin import AdminAuth
 from services.api.app import ApiDeps, create_app
 from services.gateway.approvals import MemoryApprovalStore
 from services.gateway.audit import (
@@ -39,14 +40,18 @@ async def seeded_audit() -> MemoryAuditSink:
 
 
 def client_for(sink: MemoryAuditSink | None = None, root: Path = REPO_ROOT) -> TestClient:
+    """A client logged in as admin (these endpoints are the owner's admin area, F10d)."""
     audit = sink or MemoryAuditSink()
+    admin = AdminAuth("test-admin")
     deps = ApiDeps(
         approvals=MemoryApprovalStore(audit=audit),
         audit=MemoryAuditReader(audit),
         repo_root=root,
         jaeger_ui_url="http://jaeger.local:16686",
+        admin=admin,
     )
-    return TestClient(create_app(deps))
+    token = admin.login("test-admin").token
+    return TestClient(create_app(deps), headers={"authorization": f"Bearer {token}"})
 
 
 async def test_audit_lists_newest_first_with_trace_links() -> None:

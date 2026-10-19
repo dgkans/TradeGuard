@@ -158,8 +158,8 @@ export function ChatPage({ session }: { session: SessionInfo }) {
   async function decide(approve: boolean, note: string) {
     if (!pending) return;
     try {
-      if (approve) await api.approve(pending.approval_id, session.user, note);
-      else await api.reject(pending.approval_id, session.user, note);
+      if (approve) await api.approveOwn(sessionId, pending.approval_id, note);
+      else await api.rejectOwn(sessionId, pending.approval_id, note);
       setCardError(null);
     } catch (failure) {
       setCardError(failure);

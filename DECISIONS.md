@@ -561,3 +561,35 @@ Decision:
 Alternatives considered: a separate database for tests (still worth doing, F12);
 pre-rounding numbers in the API (the reports already store full precision; formatting is a
 display concern).
+
+## D021: Trader limits, market view, owner-only admin (F10d)
+Date: 2026-10-18
+Decision:
+- **Traders edit their own limits**, within server-side bounds: per order $100 to $100,000;
+  per stock up to $500,000 and at least the per-order limit; share of account in stocks 5%
+  to 100%; 1 to 100 orders a day; an approval line no higher than the per-order limit;
+  allowed stocks only from those the market has prices for.
+  - The edit goes through a `Limits` model that forbids extra fields, so `allow_short`,
+    taint, intent and market hours can't be sent.
+  - The result is re-validated as a full `Policy` and swapped into the session's live
+    gateway (`Gateway.update_policy` rebuilds the pipeline). Each change is an
+    `update_limits` audit row.
+- **Admin is the owner's only, with no database:** one `ADMIN_PASSWORD` from `.env`.
+  - Tokens are `<expiry ms>.<HMAC-SHA256>`, signed with a key made in each API process, so
+    a restart logs everyone out.
+  - Password and signature comparisons are constant time. 5 wrong passwords lock login for
+    5 minutes. Without a password, admin is off (fail closed).
+  - Admin only: all approvals, audit, rule counts across sessions, eval reports.
+- **Traders approve only their own orders:** a per-session approval endpoint checks the
+  approval's session id. The global approval endpoints are admin only.
+- **Market view from fixtures only:** index and watchlist prices, day change against the
+  prior close, and 5 minute closes for sparklines, at the desk scenario's start time.
+  Allocation is computed from the trader's own account.
+Alternatives considered:
+- Trader logins: the user chose none.
+- JWT libraries: one owner, so HMAC tokens are enough.
+- Charting libraries: small SVG components cover sparklines, bars and a donut.
+- Letting traders turn off the AI checks: they exist to protect the trader from the agent.
+Consequences: anyone at the local URL can start or end any trader session (no trader
+accounts). That's acceptable for a local demo; a public deployment needs per-trader
+identity (F12).

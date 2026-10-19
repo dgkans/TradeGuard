@@ -233,3 +233,36 @@ export interface Portfolio {
   total_day_change: number;
   orders: OrderRow[];
 }
+
+export interface Limits {
+  max_order_usd: number;
+  max_position_usd: number;
+  max_exposure_pct: number;
+  max_orders_per_day: number;
+  approval_over_usd: number;
+  approval_sell_pct: number;
+  allowed_symbols: string[];
+}
+
+export interface LimitsView {
+  profile: string;
+  limits: Limits;
+  locked: string[];
+  universe: string[];
+}
+
+export interface MarketItem {
+  symbol: string;
+  price: number;
+  previous_close: number | null;
+  day_change_pct: number;
+  spark: number[];
+}
+
+export interface MarketOverview {
+  as_of: string;
+  market_open: boolean;
+  indices: MarketItem[];
+  watchlist: MarketItem[];
+  movers: { symbol: string; day_change_pct: number }[];
+}

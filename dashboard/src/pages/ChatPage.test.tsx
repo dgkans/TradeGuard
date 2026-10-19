@@ -73,7 +73,7 @@ describe("ChatPage", () => {
     const send = vi.fn(async () => turn({ pending_approval: card }));
     let release: () => void = () => undefined;
     const decided = new Promise<void>((resolve) => { release = resolve; });
-    const approve = vi.fn(async () => {
+    const approveOwn = vi.fn(async () => {
       release();
       return approval({ status: "approved" });
     });
@@ -83,7 +83,7 @@ describe("ChatPage", () => {
                     decision: { role: "decision", status: "executed",
                                 text: "Approved. The order was sent. Decided by Asha." } });
     });
-    renderWith(fakeApi({ session: vi.fn(async () => state()), send, approve, resume }));
+    renderWith(fakeApi({ session: vi.fn(async () => state()), send, approveOwn, resume }));
     await say("Buy $1500 of NVDA");
 
     const box = await screen.findByRole("article", { name: /needs your approval/i });
@@ -91,7 +91,7 @@ describe("ChatPage", () => {
     expect(within(box).getByText(/over the approval threshold/)).toBeInTheDocument();
     expect(resume).toHaveBeenCalledWith("web-asha-1");
     await userEvent.click(within(box).getByRole("button", { name: /approve/i }));
-    expect(approve).toHaveBeenCalledWith("apr_1", "Asha", "");
+    expect(approveOwn).toHaveBeenCalledWith("web-asha-1", "apr_1", "");
     expect(await screen.findByText("Done: bought $1,500 of NVDA.")).toBeInTheDocument();
     expect(screen.getByText(/Approved\. The order was sent\./)).toBeInTheDocument();
   });

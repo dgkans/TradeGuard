@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useApi } from "../api";
+import { Donut } from "../components/charts";
 import { Empty, ErrorNote } from "../components/common";
 import { marketTime, money } from "../format";
 import type { OrderRow, Portfolio, SessionInfo } from "../types";
@@ -100,6 +101,13 @@ export function PositionsPage({ session, pollMs = 3000 }: { session: SessionInfo
         Demo market {book.market_open ? "open" : "closed"} · prices as of {marketTime(book.as_of)}
       </p>
       <ErrorNote error={error} />
+
+      <div className="allocation">
+        <Donut title="Allocation" slices={[
+          { label: "Cash", value: book.cash },
+          ...book.positions.map((row) => ({ label: row.symbol, value: row.value })),
+        ]} />
+      </div>
 
       <h2>Positions ({book.positions.length})</h2>
       {book.positions.length === 0 ? (

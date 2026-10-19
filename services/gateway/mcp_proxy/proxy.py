@@ -149,11 +149,20 @@ class Gateway:
         if self.provenance is not None:
             await self.provenance.load()  # a restarted gateway resumes the session's record
         if self.policy is not None:
-            schemas = {}
-            for tool in self.tools:
-                schemas[tool.name] = dict(tool.input_schema)
-            self.pipeline = Pipeline(self.policy, schemas, judge=self.judge)
+            self.pipeline = Pipeline(self.policy, self._schemas(), judge=self.judge)
         return self
+
+    def _schemas(self) -> dict[str, dict[str, Any]]:
+        schemas = {}
+        for tool in self.tools:
+            schemas[tool.name] = dict(tool.input_schema)
+        return schemas
+
+    def update_policy(self, policy: Policy) -> None:
+        """Use new limits from the next call on (a trader editing their limits, F10d). Pending
+        approvals are re-checked against the new policy when they execute."""
+        self.policy = policy
+        self.pipeline = Pipeline(policy, self._schemas(), judge=self.judge)
 
     async def __aexit__(
         self,

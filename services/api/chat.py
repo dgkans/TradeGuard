@@ -38,9 +38,12 @@ from services.api.describe import (
     describe_step,
     friendly_reason,
 )
+from services.api.limits import LOCKED, Limits, limits_of, universe, with_limits
 from services.common.config import Settings, child_env
 from services.common.llm import make_chat_model
+from services.gateway.audit import DecisionRecord
 from services.gateway.mcp_proxy.proxy import OPERATOR_META_KEY, OPERATOR_TOKEN_ENV
+from services.gateway.policy.model import Policy
 
 logger = logging.getLogger(__name__)
 PAPER_SCENARIO = "alpaca_paper"
@@ -97,6 +100,7 @@ class Connection:
 
     target: Any
     market: Any | None = None
+    gateway: Any | None = None  # in-process gateway, for live limit changes (F10d)
 
 
 Connector = Callable[[ChatSpec, str, str], AbstractAsyncContextManager[Connection]]
@@ -120,6 +124,7 @@ class ChatSession:
         self.pending: dict[str, Any] | None = None
         self.log = ToolCallLog(thread_id=session_id)
         self.market: Any | None = None
+        self.gateway: Any | None = None
         self._operator_token = secrets.token_urlsafe(24)
         self._meta = {OPERATOR_META_KEY: self._operator_token}
         self._jobs: asyncio.Queue[Job | None] = asyncio.Queue()
@@ -152,6 +157,7 @@ class ChatSession:
                 chat_model, json_model = self.service.models()
                 self._toolset = ts
                 self.market = connection.market
+                self.gateway = connection.gateway
                 self._graph = build_graph(
                     chat_model, json_model, ts.tools, context=context,
                     checkpointer=InMemorySaver(), max_tool_calls=self.service.max_tool_calls,
@@ -347,6 +353,40 @@ class ChatSession:
             "orders": orders,
         }
 
+    def limits(self, template: Policy | None = None) -> dict[str, Any]:
+        """The trader's current limits (or a template's), the bounds' universe, and the
+        protections that stay on."""
+        policy = template or self._policy()
+        return {
+            "profile": policy.name,
+            "limits": limits_of(policy).model_dump(),
+            "locked": list(LOCKED),
+            "universe": universe(),
+        }
+
+    async def set_limits(self, limits: Limits) -> dict[str, Any]:
+        """Apply new limits to this trader's gateway now, and record the change in the
+        audit log. Raises ChatError when the session has no in-process guard."""
+        policy = with_limits(self._policy(), limits, self.spec.user)
+        gateway = self.gateway
+        if gateway is None:
+            raise ChatError("limits can be edited only for guarded demo sessions")
+        await gateway.audit.record_decision(DecisionRecord(
+            session_id=self.session_id, upstream=None, tool="update_limits",
+            args=limits.model_dump(), decision="ALLOW", rule_id="trader_limits",
+            reason=f"{self.spec.user} changed their limits",
+        ))  # fmt: skip
+        gateway.update_policy(policy)
+        self.transcript.append({"role": "decision", "status": "limits",
+                                "text": "Your limits were updated."})  # fmt: skip
+        return self.limits()
+
+    def _policy(self) -> Policy:
+        if self.gateway is None or self.gateway.policy is None:
+            raise ChatError("this session has no guard, so it has no limits")
+        policy: Policy = self.gateway.policy
+        return policy
+
     def info(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
@@ -525,7 +565,7 @@ def inprocess_connector(
             approval_timeout_s=approval_timeout_s, provenance=shared.provenance, judge=judge,
         )  # fmt: skip
         async with gateway:
-            yield Connection(gateway.server, market)
+            yield Connection(gateway.server, market, gateway)
 
     return connect
 

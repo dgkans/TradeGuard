@@ -55,6 +55,9 @@ describe("PositionsPage", () => {
     expect(within(orders).getByText("$1,500")).toBeInTheDocument();
     expect(within(orders).getByText("filled")).toBeInTheDocument();
     expect(portfolio).toHaveBeenCalledWith("web-asha-1");
+    const donut = screen.getByRole("img", { name: /allocation/i });
+    expect(donut).toHaveAccessibleName(/cash \$23,500/i);
+    expect(donut).toHaveAccessibleName(/NVDA \$3,650/);
   });
 
   it("says so when the trader has no positions yet", async () => {

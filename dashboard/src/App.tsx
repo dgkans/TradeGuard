@@ -1,29 +1,35 @@
 import { useCallback, useEffect, useState } from "react";
 import { useApi } from "./api";
+import { AdminLogin } from "./components/AdminLogin";
 import { HowItWorks } from "./components/HowItWorks";
+import { MarketOverview, MarketWatch } from "./components/MarketOverview";
 import { TraderBar } from "./components/TraderBar";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { ChatPage } from "./pages/ChatPage";
 import { EvalsPage } from "./pages/EvalsPage";
+import { LimitsPage } from "./pages/LimitsPage";
 import { PoliciesPage } from "./pages/PoliciesPage";
 import { PositionsPage } from "./pages/PositionsPage";
 import type { SessionInfo } from "./types";
 
-const TRADE = [
+// Every visitor (a trader) sees these.
+const TRADER = [
   { path: "chat", label: "Chat" },
   { path: "positions", label: "Positions" },
+  { path: "limits", label: "My limits" },
 ] as const;
 
-const OPERATOR = [
+// Only the owner, after the admin login.
+const ADMIN = [
   { path: "approvals", label: "Approvals" },
   { path: "audit", label: "Audit log" },
-  { path: "policies", label: "Risk profiles" },
-  { path: "evals", label: "Test results" },
+  { path: "activity", label: "Guard activity" },
+  { path: "results", label: "Test results" },
 ] as const;
 
-type Path = (typeof TRADE)[number]["path"] | (typeof OPERATOR)[number]["path"];
-const ALL: readonly { path: Path; label: string }[] = [...TRADE, ...OPERATOR];
+type Path = (typeof TRADER)[number]["path"] | (typeof ADMIN)[number]["path"];
+const ALL: readonly { path: Path; label: string }[] = [...TRADER, ...ADMIN];
 const ACTIVE_KEY = "tradeguard.active-session";
 
 function current(): Path {
@@ -95,19 +101,54 @@ function NavLink({ path, label, active, badge }: { path: Path; label: string; ac
   );
 }
 
+function Landing({ onHow }: { onHow: () => void }) {
+  return (
+    <div className="landing">
+      <div className="hero">
+        <div>
+          <h1>Trade in plain words. TradeGuard keeps the AI in check.</h1>
+          <p className="lede">
+            Start a session on the left, then tell the agent what to trade. Every order is
+            checked against your limits and your request before it reaches the broker.
+          </p>
+          <div className="hero-steps">
+            <span><strong>1</strong> Start a session</span>
+            <span><strong>2</strong> Ask or trade in chat</span>
+            <span><strong>3</strong> Approve large orders</span>
+            <span><strong>4</strong> Watch your positions</span>
+          </div>
+        </div>
+        <button type="button" className="button button-quiet" onClick={onHow}>
+          See how it works
+        </button>
+      </div>
+      <MarketOverview />
+    </div>
+  );
+}
+
 export function App() {
+  const api = useApi();
   const path = useRoute();
   const { sessions, setSessions, refresh } = useSessions(3000);
   const [activeId, setActiveId] = useState<string | null>(storedActive);
   const [howOpen, setHowOpen] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [admin, setAdmin] = useState(() => api.isAdmin());
 
   const active = sessions.find((session) => session.session_id === activeId) ?? null;
   const waiting = sessions.filter((session) => session.waiting_for_approval).length;
-  const trading = path === "chat" || path === "positions";
+  const adminPage = ADMIN.some((page) => page.path === path);
 
   function select(id: string | null) {
     setActiveId(id);
     remember(id);
+  }
+
+  function logout() {
+    api.adminLogout();
+    setAdmin(false);
+    if (adminPage) window.location.hash = "#/chat";
   }
 
   return (
@@ -120,22 +161,44 @@ export function App() {
           TradeGuard
         </a>
         <nav aria-label="Pages">
-          {TRADE.map((page) => (
+          {TRADER.map((page) => (
             <NavLink key={page.path} path={page.path} label={page.label}
                      active={page.path === path} />
           ))}
-          {OPERATOR.map((page) => (
+          {admin ? ADMIN.map((page) => (
             <NavLink key={page.path} path={page.path} label={page.label}
                      active={page.path === path}
                      badge={page.path === "approvals" ? waiting : undefined} />
-          ))}
+          )) : null}
         </nav>
-        <button type="button" className="button button-quiet how" onClick={() => setHowOpen(true)}>
-          How it works
-        </button>
+        <div className="top-actions">
+          <button type="button" className="button button-quiet how" onClick={() => setHowOpen(true)}>
+            How it works
+          </button>
+          {admin ? (
+            <button type="button" className="link-button" onClick={logout}>Log out</button>
+          ) : (
+            <button type="button" className="link-button admin-link"
+                    onClick={() => setLoginOpen(true)}>
+              Admin
+            </button>
+          )}
+        </div>
       </header>
       <HowItWorks open={howOpen} onClose={() => setHowOpen(false)} />
-      {trading ? (
+      <AdminLogin open={loginOpen} onClose={() => setLoginOpen(false)}
+                  onLoggedIn={() => {
+                    setAdmin(true);
+                    setLoginOpen(false);
+                  }} />
+      {adminPage && admin ? (
+        <main className="content">
+          {path === "approvals" ? <ApprovalsPage /> : null}
+          {path === "audit" ? <AuditPage /> : null}
+          {path === "activity" ? <PoliciesPage /> : null}
+          {path === "results" ? <EvalsPage /> : null}
+        </main>
+      ) : (
         <div className="desk">
           <TraderBar
             sessions={sessions}
@@ -158,35 +221,26 @@ export function App() {
                 <div className="desk-head">
                   <h1>{active.user}</h1>
                   <span className="muted small">
-                    {active.policy === "strict" ? "Strict" : "Standard"} risk profile · guarded
-                    by TradeGuard
+                    {active.policy === "strict" ? "Strict" : "Standard"} profile · guarded by
+                    TradeGuard
                   </span>
                 </div>
-                {path === "chat" ? <ChatPage key={active.session_id} session={active} />
-                                 : <PositionsPage key={active.session_id} session={active} />}
+                {path === "positions" ? (
+                  <PositionsPage key={active.session_id} session={active} />
+                ) : path === "limits" ? (
+                  <LimitsPage key={active.session_id} session={active} />
+                ) : (
+                  <div className="chat-layout">
+                    <ChatPage key={active.session_id} session={active} />
+                    <MarketWatch />
+                  </div>
+                )}
               </>
             ) : (
-              <div className="empty-desk">
-                <h1>Start trading with a guarded AI agent</h1>
-                <p className="lede">
-                  Enter a trader name on the left and press Start session. Then ask the agent
-                  to trade in plain words, and watch your positions update.
-                </p>
-                <button type="button" className="button button-quiet"
-                        onClick={() => setHowOpen(true)}>
-                  See how it works
-                </button>
-              </div>
+              <Landing onHow={() => setHowOpen(true)} />
             )}
           </main>
         </div>
-      ) : (
-        <main className="content">
-          {path === "approvals" ? <ApprovalsPage /> : null}
-          {path === "audit" ? <AuditPage /> : null}
-          {path === "policies" ? <PoliciesPage /> : null}
-          {path === "evals" ? <EvalsPage /> : null}
-        </main>
       )}
     </div>
   );

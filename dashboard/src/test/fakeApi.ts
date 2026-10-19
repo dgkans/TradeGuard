@@ -23,6 +23,15 @@ export function fakeApi(overrides: Partial<Api> = {}): Api {
     send: notMocked("send"),
     resume: notMocked("resume"),
     portfolio: notMocked("portfolio"),
+    approveOwn: notMocked("approveOwn"),
+    rejectOwn: notMocked("rejectOwn"),
+    limits: notMocked("limits"),
+    setLimits: notMocked("setLimits"),
+    stopped: notMocked("stopped"),
+    marketOverview: notMocked("marketOverview"),
+    adminLogin: notMocked("adminLogin"),
+    adminLogout: vi.fn(),
+    isAdmin: vi.fn(() => false),
     closeSession: notMocked("closeSession"),
   };
   return { ...base, ...overrides };
