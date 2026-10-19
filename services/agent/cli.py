@@ -217,6 +217,8 @@ def run_api(settings: Settings) -> int:
 
     from services.api.app import create_postgres_app
 
+    # Trader sessions run their gateway in this process, so traces start here (F10b).
+    setup_tracing("tradeguard-api", settings)
     app = create_postgres_app(settings)
     uvicorn.run(app, host=settings.api_host, port=settings.api_port, log_level="warning")
     return 0

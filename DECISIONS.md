@@ -497,3 +497,43 @@ Alternatives considered:
 - Installing the server into our environment: dependency conflict.
 Consequences: a new Alpaca server release needs a deliberate version bump and a re-check of
 the tool schemas. Pattern tools aren't available on paper yet.
+
+## D019: Multi trader desk, plain language, in-process sessions (F10b)
+Date: 2026-10-18
+Context: the user wants a product flow (start a session per trader, trade in chat, see
+positions, end the session), several traders at once, a trader view without JSON, no clock
+buttons, a "How it works" explainer, and injection testing out of the UI. The positioning is
+a guard that plugs into any broker's agent.
+Decision:
+- **Plain language, server side** (`services/api/describe.py`): each tool call becomes one
+  sentence. Each rule that can stop an order has a trader facing title. Gateway reasons
+  are reworded: setting names become words, and amounts are shown as $3,000. Rule ids stay
+  in the operator views. Trader sessions add a style note to the agent's system prompt
+  (plain sentences, no order ids, don't claim fills it hasn't seen); evals and the CLI
+  don't, so eval numbers are unaffected.
+- **Fills without a clock:** after a turn, if any order is open, the trader's market moves
+  forward 5 minutes. Market orders fill at the next bar, as before, with no look-ahead.
+- **Sessions in process:** each trader's replay market and gateway run inside the API. They
+  share one set of Postgres stores and one judge; there are no stdio subprocesses (Alpaca
+  paper sessions still use one). One session per trader name, 8 at most. Measured with the
+  same script before and after (demo scenario, "What is NVDA at?", all sent at once, one
+  run each):
+  - 3 users: sessions started in 3.6 s → 0.1 s. Memory: about 1.1 GB for the per-user
+    subprocesses alone (plus the API) → about 164 MB for the whole API. Replies:
+    14.7 / 16.5 / 18.2 s → 13.6 / 14.1 / 14.7 s.
+  - 1 user: reply 12.7 s → 7.5 s.
+  The local model is now the limit.
+- **Injection hidden from the UI, not removed:** a `desk` scenario (the demo day without the
+  planted news item) is the only one the trader view uses. The scenario picker and the
+  no-guard toggle left the trader view. Taint tracking still runs in every guarded session.
+- **Operator console:** Approvals, Audit log, Policies and Evals are grouped apart from the
+  trader's Chat and Positions.
+Alternatives considered:
+- Plain language in the frontend: the result data and rule semantics live in Python, and
+  testing it there is simpler.
+- A real-time clock: fills would take minutes. The user chose automatic fills.
+- Keeping a subprocess per trader: about 350 MB per trader.
+Consequences: sessions share the API process, so a crash in one gateway could affect
+others. Each session runs in its own task with errors contained, but there is no process
+isolation. Shared Postgres connections serialize writes; fine for a handful of traders,
+not for hundreds.

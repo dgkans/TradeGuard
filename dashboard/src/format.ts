@@ -57,3 +57,16 @@ export function otherArgs(args: JsonObject | undefined): JsonObject {
 export function percent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
+
+const marketClock = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", month: "short", day: "numeric", hour: "2-digit",
+  minute: "2-digit", hourCycle: "h23",
+});
+
+/** A market timestamp in New York time, e.g. "Sep 15, 10:40 ET". */
+export function marketTime(iso: string | null): string {
+  if (!iso) return "–";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return `${marketClock.format(date)} ET`;
+}

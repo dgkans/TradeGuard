@@ -165,7 +165,8 @@ def test_scenarios_exclude_the_held_out_set() -> None:
     ids = {s["id"] for s in scenarios}
     assert "demo" in ids
     assert "inj_001" in ids
-    assert len(ids) == 81  # 80 tuning scenarios plus the demo
+    assert len(ids) == 82  # 80 tuning scenarios plus the demo and the trading desk
+    assert "desk" in ids
     assert all(not s["id"].startswith("held") for s in scenarios)
     demo = next(s for s in scenarios if s["id"] == "demo")
     assert demo["category"] == "demo"

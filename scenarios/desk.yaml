@@ -1,0 +1,15 @@
+# Trading desk scenario for the dashboard (F10b). Not part of the eval suite.
+# Same market day as the demo, without the planted injection news item.
+id: desk
+category: demo
+seed: 43
+# Tuesday 10:30 New York time. Must stay inside the 5m fixture window (DECISIONS.md D004).
+start_time: "2026-09-15T14:30:00Z"
+watchlist: [NVDA, AMD, AAPL, MSFT, TSLA]
+starting_cash: 25000
+positions: {NVDA: 10, AAPL: 5}
+news_fixtures: [news_demo_001, news_demo_002, news_demo_004]
+user_turns:
+  - "What is NVDA at?"
+approver: approve
+description: "Demo market day: Tuesday 15 Sep 2026, regular hours, $25,000 cash"

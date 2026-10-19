@@ -136,59 +136,96 @@ export interface Scenario {
 
 export interface SessionInfo {
   session_id: string;
+  user: string;
   scenario: string;
   guarded: boolean;
   policy: string | null;
   model: string;
+  started_at: string;
+  busy: boolean;
+  waiting_for_approval: boolean;
 }
 
-export interface PendingApproval {
-  approval_id: string;
+export type StepStatus = "ok" | "blocked" | "held" | "failed";
+
+export interface StepEntry {
+  role: "step";
+  status: StepStatus;
   tool: string;
-  args?: JsonObject;
-  rule_id: string;
-  reason: string;
-  expires_at?: string;
-  status: string;
-}
-
-export interface ApprovalOutcome {
-  approval_id: string;
-  status: string;
-  executed?: boolean;
-  decided_by?: string | null;
-  note?: string | null;
+  text: string;
+  title?: string;
   reason?: string;
-  [key: string]: Json | undefined;
+  rule_id?: string;
 }
 
-export interface ToolCallEntry {
-  role: "tool";
+export interface ApprovalCardData {
+  approval_id: string;
   tool: string;
   args: JsonObject;
-  error: string | null;
-  latency_ms: number;
-  result_preview: string | null;
+  rule_id: string;
+  title: string;
+  reason: string;
+  expires_at?: string | null;
+}
+
+export interface DecisionEntry {
+  role: "decision";
+  status: string;
+  text: string;
 }
 
 export type TranscriptEntry =
   | { role: "user"; text: string }
   | { role: "agent"; text: string }
-  | ToolCallEntry
-  | ({ role: "approval" } & PendingApproval)
-  | { role: "decision"; outcome: ApprovalOutcome }
-  | { role: "clock"; minutes: number; clock: JsonObject };
+  | StepEntry
+  | ({ role: "approval" } & ApprovalCardData)
+  | DecisionEntry;
 
 export interface SessionState extends SessionInfo {
-  busy: boolean;
-  pending_approval: PendingApproval | null;
+  pending_approval: ApprovalCardData | null;
   transcript: TranscriptEntry[];
 }
 
 export interface TurnResult {
   answer: string | null;
-  pending_approval: PendingApproval | null;
-  understand: { request_type: string | null; summary: string | null };
-  tool_calls: ToolCallEntry[];
-  outcome: ApprovalOutcome | null;
+  pending_approval: ApprovalCardData | null;
+  steps: StepEntry[];
+  decision: DecisionEntry | null;
+}
+
+export interface PositionRow {
+  symbol: string;
+  qty: number;
+  avg: number;
+  ltp: number;
+  value: number;
+  pnl: number;
+  pnl_pct: number;
+  day_change_pct: number | null;
+}
+
+export interface OrderRow {
+  id: string;
+  symbol: string;
+  side: string;
+  type: string;
+  qty: number | null;
+  notional: number | null;
+  limit_price: number | null;
+  status: string;
+  submitted_at: string;
+  filled_qty: number | null;
+  filled_avg_price: number | null;
+}
+
+export interface Portfolio {
+  as_of: string;
+  market_open: boolean;
+  cash: number;
+  equity: number;
+  positions_value: number;
+  positions: PositionRow[];
+  total_pnl: number;
+  total_day_change: number;
+  orders: OrderRow[];
 }

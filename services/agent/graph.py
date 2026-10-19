@@ -36,10 +36,12 @@ tracer = trace.get_tracer("tradeguard.agent")
 
 @dataclass(frozen=True)
 class AgentContext:
-    """Facts about the session that go into the system prompt."""
+    """Facts about the session that go into the system prompt. `style`, if set, is appended
+    as extra instructions (the dashboard's plain-language note for traders, F10b)."""
 
     scenario_id: str
     watchlist: list[str]
+    style: str = ""
 
 
 class AgentState(MessagesState):
@@ -98,6 +100,8 @@ def build_graph(
             watchlist=", ".join(context.watchlist),
             plan=state.get("plan", ""),
         )
+        if context.style:
+            system = f"{system.rstrip()}\n\n{context.style.strip()}"
         reply = await acting_model.ainvoke([SystemMessage(system), *state["messages"]])
         calls = len(reply.tool_calls) if isinstance(reply, AIMessage) else 0
         return {

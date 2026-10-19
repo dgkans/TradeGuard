@@ -184,3 +184,25 @@ async def test_session_resumes_from_postgres_checkpoint(replay_session: ReplaySe
     assert "Price of NVDA?" in contents
     assert "NVDA is $212.74." in contents
     assert contents[-1] == "And AMD?"
+
+
+async def test_style_note_is_added_to_the_system_prompt_only_when_set(
+    replay_session: ReplaySession,
+) -> None:
+    """Trader sessions (F10b) add a plain-language style note; evals and the CLI don't."""
+    from langchain_core.messages import SystemMessage
+
+    def acting_system(model: ScriptedChatModel) -> str:
+        systems = [str(m.content) for p in model.prompts for m in p if isinstance(m, SystemMessage)]
+        return [s for s in systems if "trading assistant" in s][-1]  # act runs after plan
+
+    plain_model = ScriptedChatModel([understand("question", "x"), plan(), answer("ok")])
+    styled_model = ScriptedChatModel([understand("question", "x"), plan(), answer("ok")])
+    styled = AgentContext("desk", ["NVDA"], style="Never show order ids.")
+    for model, context in ((plain_model, CONTEXT), (styled_model, styled)):
+        log = ToolCallLog()
+        async with McpToolset(build_server(replay_session), log=log) as toolset:
+            graph = build_graph(model, model, toolset.tools, context=context)
+            await run_turn(graph, "hi", thread_id=str(uuid.uuid4()))
+    assert "Never show order ids." not in acting_system(plain_model)
+    assert acting_system(styled_model).rstrip().endswith("Never show order ids.")

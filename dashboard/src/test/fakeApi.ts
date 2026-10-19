@@ -17,11 +17,12 @@ export function fakeApi(overrides: Partial<Api> = {}): Api {
     evals: notMocked("evals"),
     latestEval: notMocked("latestEval"),
     scenarios: notMocked("scenarios"),
+    sessions: notMocked("sessions"),
     createSession: notMocked("createSession"),
     session: notMocked("session"),
     send: notMocked("send"),
     resume: notMocked("resume"),
-    advance: notMocked("advance"),
+    portfolio: notMocked("portfolio"),
     closeSession: notMocked("closeSession"),
   };
   return { ...base, ...overrides };

@@ -5,9 +5,9 @@ import type {
   AuditPage,
   EvalReport,
   EvalReportRef,
-  JsonObject,
   PolicyDetail,
   PolicyRef,
+  Portfolio,
   RuleCount,
   Scenario,
   SessionInfo,
@@ -38,11 +38,12 @@ export interface Api {
   evals(): Promise<EvalReportRef[]>;
   latestEval(): Promise<{ name: string; report: EvalReport }>;
   scenarios(): Promise<Scenario[]>;
-  createSession(scenario: string, guarded: boolean, policy: string): Promise<SessionInfo>;
+  sessions(): Promise<SessionInfo[]>;
+  createSession(user: string, policy: string): Promise<SessionInfo>;
   session(id: string): Promise<SessionState>;
   send(id: string, text: string): Promise<TurnResult>;
   resume(id: string): Promise<TurnResult>;
-  advance(id: string, minutes: number): Promise<{ clock: JsonObject }>;
+  portfolio(id: string): Promise<Portfolio>;
   closeSession(id: string): Promise<void>;
 }
 
@@ -121,13 +122,15 @@ export const httpApi: Api = {
   async scenarios() {
     return (await request<{ scenarios: Scenario[] }>("/scenarios")).scenarios;
   },
-  createSession: (scenario, guarded, policy) =>
-    post<SessionInfo>("/chat/sessions", { scenario, guarded, policy }),
+  async sessions() {
+    return (await request<{ sessions: SessionInfo[] }>("/chat/sessions")).sessions;
+  },
+  createSession: (user, policy) =>
+    post<SessionInfo>("/chat/sessions", { user, policy, scenario: "desk", guarded: true }),
   session: (id) => request<SessionState>(`/chat/sessions/${encodeURIComponent(id)}`),
   send: (id, text) => post<TurnResult>(`/chat/sessions/${encodeURIComponent(id)}/messages`, { text }),
   resume: (id) => post<TurnResult>(`/chat/sessions/${encodeURIComponent(id)}/resume`),
-  advance: (id, minutes) =>
-    post<{ clock: JsonObject }>(`/chat/sessions/${encodeURIComponent(id)}/advance`, { minutes }),
+  portfolio: (id) => request<Portfolio>(`/chat/sessions/${encodeURIComponent(id)}/portfolio`),
   async closeSession(id) {
     await request<unknown>(`/chat/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
   },

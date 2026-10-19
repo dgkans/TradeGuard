@@ -15,6 +15,7 @@
 | F9b Hard injection suite | done (one model) | 2026-10-18 |
 | F9c Worst case agent | done | 2026-10-18 |
 | F10 Dashboard | done | 2026-10-18 |
+| F10b Trading desk (multi user) | done | 2026-10-18 |
 | F11 Alpaca paper | in progress | |
 | F12 Deployment | not started | |
 | F13 Impact and beta | not started | |
@@ -436,3 +437,46 @@
 - Lint: SIM108 is ignored like SIM110 (PLAN 8 prefers explicit if/else).
 ### Loop summary
 -
+
+## F10b Trading desk, multi user (user request 2026-10-18)
+### Plan
+User decisions, 2026-10-18:
+- Injection protection stays in the guard but is hidden from the UI.
+- Orders fill automatically (no clock buttons).
+- US stocks in dollars.
+- Replay market for v1 (no accounts). This also settles F11's open choice: the real paper check stays open, and the adapter stays for anyone with keys.
+- Positioning: a guard you can plug into any broker's agent.
+
+Work:
+- **Trader flow:** Start session (trader name, risk profile) → chat with the agent → Positions tab (Kite style: instrument, qty, avg, LTP, P&L, day change, totals; plus today's orders) → End session. Several traders at once, each with a sidebar entry and their own End button.
+- **Chat in plain language:** every tool step becomes a sentence, written server side, e.g. "Checked NVDA: $212.74" or "Blocked: orders over $2,000 aren't allowed". Blocked and held orders show as friendly notices; agent answers are rendered as simple text (bold, lists). No JSON anywhere in the trader view.
+- **Fills:** after a turn places an order, the session's market moves 5 minutes so market orders fill; limit orders fill when the price gets there. The clock buttons are removed.
+- **Hide injection:** a new `desk` scenario (the demo day without the planted news item, a small starting portfolio). The scenario picker leaves the trader view; the eval and test scenarios are unchanged.
+- **Scale:** each session's guard runs inside the API process (in-process replay market and gateway, shared Postgres stores) instead of 2 subprocesses per user. Measured before: about 350 MB per user. The session limit goes to 8.
+- **"How it works":** a button in the top bar opens a panel with the flow (You → Agent → TradeGuard checks → Broker), a worked example ("Buy $1500 of NVDA" → held → you approve → filled → Positions), and how a broker plugs it in (implement the 9-tool contract, or wrap its own MCP server like the Alpaca adapter).
+- **Operator console:** Approvals, Audit log, Policies and Evals stay, grouped as an operator view.
+### Acceptance
+- [x] Several traders run sessions at once, each with their own positions and End session. Tested: two traders at once with separate books; ending one leaves the other. Also checked live on qwen3:8b: Asha's AMD buy and Ben's approved NVDA buy both filled, with separate positions.
+- [x] The trader view never shows raw JSON (tested: transcript and chat text checks in pytest and Vitest; live transcripts had 0 entries with braces)
+- [x] Positions tab shows qty, avg, LTP, P&L and day change, with totals (tested). Tiny values show a neutral 0.00, and market times are in New York time.
+- [x] Market orders fill without clock buttons (tested: approved order filled; clock buttons gone)
+- [x] How it works panel with a flow example (tested)
+- [x] Concurrency re-measured with the in-process design (see D019): 3 users, memory about 1.1 GB → about 164 MB, replies 14.7–18.2 s → 13.6–14.7 s
+### Notes and open questions
+- Concurrency measured before the change (subprocess per session, qwen3:8b, one message each, all at once): 1 user 12.7 s reply, about 390 MB; 3 users 14.7 / 16.5 / 18.2 s, about 1.1 GB.
+- Checked at 1280 and 390 px with headless Chrome screenshots. Fixed a large empty gap on phones and a "-0.00" P&L, and folded the new session form once a trader exists.
+- The agent's own wording was technical (order ids) and once claimed a fill it hadn't seen. Fixed with a trader-only style note in the system prompt; evals don't use it.
+- Plain-language reasons: policy setting names are replaced in the trader view only. The audit log keeps the exact wording.
+### Loop summary
+- Built:
+  - Plain-language layer (`describe.py`) and trader sessions (name, risk profile, one per trader, up to 8), running in the API process.
+  - Automatic fills, a positions endpoint and the `desk` scenario.
+  - Dashboard redesign: a trader sidebar with New and End, a plain chat with notices and approval cards, a Kite style Positions page, a How it works panel, and an operator console grouping.
+- Tests: 422 Python passing (`make check` clean); Vitest 27 passing, lint and tsc clean, build OK. Smoke replay 10/10 matches the recording.
+- Evals: none affected (gateway and eval prompts unchanged).
+- Gaps:
+  - Sessions share one process.
+  - No auth yet (F12).
+  - Positions only for replay sessions.
+  - The local model sets the user limit (about 5–8 at once on this Mac).
+- Next: F11 open item (real paper check needs keys, user declined sign up), then F12 (needs a decision on hosted accounts vs local only).

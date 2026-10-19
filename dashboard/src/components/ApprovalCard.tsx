@@ -19,10 +19,12 @@ interface Props {
   title: string;
   onDecide: (approve: boolean, note: string) => Promise<void>;
   error?: unknown;
+  /** Trader view: show the title as a heading and plain words only (no rule ids or args). */
+  trader?: boolean;
 }
 
 /** One escalated call: what the agent wants to do, why the gateway held it, approve/reject. */
-export function ApprovalCard({ approval, title, onDecide, error }: Props) {
+export function ApprovalCard({ approval, title, onDecide, error, trader = false }: Props) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const noteId = useId();
@@ -40,19 +42,25 @@ export function ApprovalCard({ approval, title, onDecide, error }: Props) {
 
   return (
     <article className="card approval-card" aria-labelledby={headingId}>
-      <h3 id={headingId} className="visually-hidden">
+      <h3 id={headingId} className={trader ? "card-title" : "visually-hidden"}>
         {title}
       </h3>
       <div className="approval-order">
         <span className="order-text">{orderSummary(approval.tool, approval.args)}</span>
-        <code className="muted">{approval.tool}</code>
+        {trader ? null : <code className="muted">{approval.tool}</code>}
       </div>
-      {Object.keys(extra).length > 0 ? <div className="args">{compactJson(extra)}</div> : null}
+      {!trader && Object.keys(extra).length > 0 ? (
+        <div className="args">{compactJson(extra)}</div>
+      ) : null}
       <dl className="facts">
-        <dt>Rule</dt>
-        <dd>
-          <code>{approval.rule_id}</code>
-        </dd>
+        {trader ? null : (
+          <>
+            <dt>Rule</dt>
+            <dd>
+              <code>{approval.rule_id}</code>
+            </dd>
+          </>
+        )}
         <dt>Why it was held</dt>
         <dd>{approval.reason}</dd>
         {approval.expires_at ? (

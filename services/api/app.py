@@ -7,10 +7,10 @@ is public. Paper/replay only, like everything else: chat sessions run replay sce
 """
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -18,11 +18,26 @@ from pydantic import BaseModel, Field
 
 from services.alpaca_adapter.adapter import PaperModeError, require_paper_settings
 from services.api import catalog
-from services.api.chat import ChatError, ChatService, settings_models, stdio_connector
+from services.api.chat import (
+    ChatError,
+    ChatService,
+    GatewayStores,
+    inprocess_connector,
+    settings_models,
+)
 from services.common.config import Settings
+from services.common.llm import make_chat_model
 from services.gateway.api.app import add_approval_routes
 from services.gateway.approvals import ApprovalStore, PostgresApprovalStore
-from services.gateway.audit import AuditQuery, AuditReader, PostgresAuditReader
+from services.gateway.audit import (
+    AuditQuery,
+    AuditReader,
+    PostgresAuditReader,
+    PostgresAuditSink,
+    check_schema,
+)
+from services.gateway.intent.judge import LlmJudge
+from services.gateway.provenance.store import PostgresProvenanceStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DECISIONS = ("ALLOW", "DENY", "ESCALATE")
@@ -38,17 +53,14 @@ class ApiDeps:
 
 
 class ChatCreate(BaseModel):
-    scenario: str = Field(min_length=1, max_length=100)
+    user: str = Field(default="trader", min_length=1, max_length=40)
+    scenario: str = Field(default="desk", min_length=1, max_length=100)
     guarded: bool = True
     policy: str = Field(default="default", min_length=1, max_length=100)
 
 
 class ChatMessage(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
-
-
-class ClockAdvance(BaseModel):
-    minutes: int = Field(ge=1, le=390)  # at most one trading day
 
 
 def create_app(deps: ApiDeps) -> FastAPI:
@@ -157,7 +169,7 @@ def add_chat_routes(app: FastAPI, deps: ApiDeps) -> None:
 
     @app.post("/chat/sessions", status_code=201)
     async def create_session(body: ChatCreate) -> dict[str, Any]:
-        session = await service().create(body.scenario, body.guarded, body.policy)
+        session = await service().create(body.scenario, body.guarded, body.policy, body.user)
         return session.info()
 
     @app.get("/chat/sessions/{session_id}")
@@ -172,9 +184,9 @@ def add_chat_routes(app: FastAPI, deps: ApiDeps) -> None:
     async def resume(session_id: str) -> dict[str, Any]:
         return await service().get(session_id).resume()
 
-    @app.post("/chat/sessions/{session_id}/advance")
-    async def advance(session_id: str, body: ClockAdvance) -> dict[str, Any]:
-        return await service().get(session_id).advance(body.minutes)
+    @app.get("/chat/sessions/{session_id}/portfolio")
+    async def portfolio(session_id: str) -> dict[str, Any]:
+        return service().get(session_id).portfolio()
 
     @app.delete("/chat/sessions/{session_id}", status_code=204)
     async def close(session_id: str) -> None:
@@ -206,11 +218,16 @@ def paper_watchlist(settings: Settings) -> list[str] | None:
 
 
 def create_postgres_app(settings: Settings) -> FastAPI:
-    """The API against DATABASE_URL, with real chat sessions (gateway subprocesses)."""
+    """The API against DATABASE_URL. Trader sessions run their market and gateway in this
+    process and share one set of Postgres stores (F10b); paper sessions use a subprocess."""
     url = settings.database_url.get_secret_value()
     holder: dict[str, Any] = {}
+
+    def stores() -> GatewayStores:
+        return cast(GatewayStores, holder["stores"])
+
     chat = ChatService(
-        connect=stdio_connector(REPO_ROOT),
+        connect=inprocess_connector(REPO_ROOT, stores, settings.approval_timeout_seconds),
         models=settings_models(settings),
         approval_timeout_s=settings.approval_timeout_seconds,
         repo_root=REPO_ROOT,
@@ -226,9 +243,17 @@ def create_postgres_app(settings: Settings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        async with PostgresApprovalStore(url) as approvals, PostgresAuditReader(url) as audit:
+        await check_schema(url)
+        async with AsyncExitStack() as stack:
+            approvals = await stack.enter_async_context(PostgresApprovalStore(url))
+            reader = await stack.enter_async_context(PostgresAuditReader(url))
+            sink = await stack.enter_async_context(PostgresAuditSink(url))
+            provenance = await stack.enter_async_context(PostgresProvenanceStore(url))
+            judge_model = make_chat_model(settings, json_mode=True, model=settings.judge_model)
+            judge = LlmJudge(judge_model, model=f"{settings.llm_provider}:{settings.judge_model}")
             holder["approvals"] = approvals
-            holder["audit"] = audit
+            holder["audit"] = reader
+            holder["stores"] = GatewayStores(sink, approvals, provenance, judge)
             try:
                 yield
             finally:

@@ -211,45 +211,58 @@ Reports (Markdown and JSON) go to `evals/reports/`. Every number quoted in this 
 comes from [RESULTS.md](RESULTS.md), which records the date, commit and models. All news
 in the scenarios is synthetic (see `fixtures/news/README.md`).
 
-## Dashboard (F10)
+## Dashboard: trading desk and operator console (F10, F10b)
 
 React + TypeScript (strict) dashboard over the TradeGuard API. Needs Node 22 (20.19+).
 
 ```bash
-make api                 # API on http://127.0.0.1:8000 (approvals, audit, policies, evals, chat)
+make api                 # API on http://127.0.0.1:8000 (sessions, positions, approvals, audit, ...)
 make dashboard-install   # once
 make dashboard           # http://127.0.0.1:5173 (proxies /api to :8000)
 make dashboard-check     # eslint (no `any`), tsc, vitest, production build
 ```
 
-Pages: **Chat** (run the agent in a replay scenario, guarded or not, with tool calls and
-approval cards inline), **Approvals** (pending queue, approve or reject with a note),
-**Audit log** (every decision, filterable, with Jaeger trace links), **Policies** (the YAML
-files and the rules that fired most), and **Evals** (the latest full suite report). The
-chat runs the same agent and gateway subprocess as `tradeguard chat`. The 20 held out
-scenarios aren't offered there. The API has no authentication yet and binds to
-127.0.0.1; F12 adds auth before anything is public.
+**Trade** (what a broker's customer sees):
+- **Chat:** talk to a guarded AI agent in plain words. Each step shows as a sentence
+  ("Checked NVDA: $212.74", "Order sent: buy $500 of AMD at market"). Blocked orders show
+  as a notice with the reason, and large orders as an approval card. No JSON anywhere.
+- **Positions:** a Kite style table (instrument, qty, avg, LTP, P&L, day change, totals),
+  cash and holdings, and today's orders.
+- **Several traders at once:** each trader starts their own session (name and risk
+  profile) and has their own account, positions, approvals and audit trail. Each has an
+  End button in the sidebar.
+
+**Operator** (the broker's risk desk): **Approvals** (every trader's pending orders),
+**Audit log** (every decision, with Jaeger trace links), **Policies** (YAML and the rules
+that fired most), **Evals** (the latest full suite report).
+
+The **How it works** button explains the flow (You → AI agent → TradeGuard → Broker) with
+a worked example, and how a broker plugs it in.
+
+The demo market is a replayed trading day (Tuesday 15 Sep 2026, from 10:30 New York time).
+After each turn it moves forward 5 minutes, so market orders fill without a clock button.
+Each trader's market and guard run inside the API process. The API has no authentication
+yet and binds to 127.0.0.1; F12 adds auth before anything is public.
 
 ### Two minute walkthrough
 
-Start Postgres, Ollama, `make jaeger`, `make api` and `make dashboard`. Then:
+Start Postgres, Ollama, `make jaeger`, `make api` and `make dashboard`, then open
+http://127.0.0.1:5173.
 
-1. **Chat, guarded (40 s).** Scenario `demo`, Guarded, policy `default`, Start session.
-   Ask "What is NVDA at?" The tool calls show inline, then the answer.
-2. **An order that needs a human (30 s).** Send "Buy $1500 of NVDA". The gateway holds it
-   (`approval_notional`: over the $1,000 threshold) and an approval card appears in the
-   chat. The Approvals tab shows a count too. Approve it there or in the card. The turn
-   finishes and the agent reports the order.
-3. **Prompt injection (20 s).** End the session. Start `inj_001` (news that tells the agent
-   to sell). Ask for the latest NVDA news. If the model takes the bait, the sell is denied
-   as `taint_unsupported`, because the user never asked for it. Starting the same scenario
-   with **No guard** shows the baseline.
-4. **Audit log (15 s).** Every call from the walkthrough, newest first: decision, rule,
-   reason and gateway overhead. Click a session to filter, or "Trace" to open the call in
-   Jaeger.
-5. **Policies and Evals (15 s).** The default policy YAML and which rules fired most. Then
-   the full eval: tuning and held out tables for no_guard, rules_only and full_guard, with
-   charts. The caveats live in [RESULTS.md](RESULTS.md); read them before quoting a number.
+1. **Start a session (10 s).** Type a trader name (e.g. Asha), keep the risk profile on
+   Standard, then press **Start session**.
+2. **Ask and trade (40 s).** Tap the "What is NVDA at?" suggestion, then send
+   "Buy $500 of AMD". Each step appears as a line, then the agent's answer.
+3. **A blocked order (20 s).** Send "Buy $3000 of TSLA". A red notice says **Order is over
+   your per-order limit**, with the reason.
+4. **An approval (30 s).** Send "Buy $1500 of NVDA". An approval card appears ("Large order:
+   needs your approval"). Press **Approve**: "Approved. The order was sent."
+5. **Positions (15 s).** Open **Positions**: AMD and the extra NVDA are there, filled, with
+   P&L and day change.
+6. **A second trader (20 s).** Press **+ New session**, start "Ben" with the **Strict**
+   profile, and trade. Asha's and Ben's positions stay separate. **End** closes either one.
+7. **Operator view (15 s).** **Approvals** lists decisions from every trader. **Audit log**
+   shows every check with a Trace link.
 
 ## Alpaca paper trading (F11)
 
